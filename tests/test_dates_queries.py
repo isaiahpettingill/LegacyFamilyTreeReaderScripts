@@ -10,6 +10,7 @@ from legacy_family_tree_reader.queries import (
     get_descendants,
     get_family,
     get_person_facts,
+    list_people,
     search_people,
     shortest_relationship_path,
 )
@@ -46,6 +47,19 @@ def test_tokenized_primary_and_alternate_name_search_is_dataset_scoped(merged_db
     assert search_people(merged_db, 2, "Casey") == []
     assert search_people(merged_db, 1, "%") == []
     assert search_people(merged_db, 1, "   ") == []
+
+
+def test_people_list_is_alphabetical_and_paginated(merged_db: Path) -> None:
+    first = list_people(merged_db, 1, limit=2)
+    second = list_people(merged_db, 1, limit=2, offset=2)
+
+    assert first["total"] == 6
+    assert first["has_more"] is True
+    assert len(first["people"]) == 2
+    assert second["offset"] == 2
+    assert {row["person_id"] for row in first["people"]}.isdisjoint(
+        row["person_id"] for row in second["people"]
+    )
 
 
 def test_family_trees_and_shortest_paths_use_legacy_gender_zero_one(merged_db: Path) -> None:

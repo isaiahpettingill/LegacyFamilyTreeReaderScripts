@@ -6,6 +6,8 @@
   <meta name="color-scheme" content="light">
   <title>Legacy Family Archive</title>
   <link rel="stylesheet" href="styles.css">
+  <script src="vendor/sql-asm.js" defer></script>
+  <script src="standalone.js" defer></script>
   <script src="app.js" defer></script>
 </head>
 <body>
@@ -17,11 +19,19 @@
       <p class="eyebrow">A private family reference</p>
       <h1>Legacy Family Archive</h1>
     </div>
-    <div class="dataset-control">
-      <label for="dataset-select">Record collection</label>
-      <select id="dataset-select" disabled>
-        <option>Loading collections...</option>
-      </select>
+    <div class="archive-controls">
+      <div class="source-control">
+        <p id="source-mode">Source: Checking archive...</p>
+        <label for="database-file">Open SQLite file</label>
+        <input id="database-file" type="file" accept=".sqlite,.sqlite3,.db,application/vnd.sqlite3,application/x-sqlite3">
+        <p class="privacy-note">Opened read-only in memory and never uploaded.</p>
+      </div>
+      <div class="dataset-control">
+        <label for="dataset-select">Record collection</label>
+        <select id="dataset-select" disabled>
+          <option>Loading collections...</option>
+        </select>
+      </div>
     </div>
   </header>
 
@@ -41,15 +51,23 @@
         </div>
         <p class="hint">Partial names and approximate spelling are welcome.</p>
       </form>
+      <div id="browse-controls" class="browse-controls" hidden>
+        <button id="browse-all" class="quiet-button" type="button" disabled>Browse all</button>
+        <nav class="pagination" aria-label="Browse people pages">
+          <button id="browse-previous" class="mini-button" type="button" disabled>Previous</button>
+          <span id="browse-count" aria-live="polite"></span>
+          <button id="browse-next" class="mini-button" type="button" disabled>Next</button>
+        </nav>
+      </div>
       <div id="search-state" class="inline-state" aria-live="polite"></div>
-      <ol id="search-results" class="search-results" aria-label="People found"></ol>
+      <ol id="search-results" class="search-results" aria-label="People in this collection"></ol>
     </aside>
 
     <article id="record" class="record" aria-labelledby="record-title">
       <div id="record-empty" class="record-empty">
         <p class="folio">Reading room</p>
         <h2 id="record-title">Select a name from the index</h2>
-        <p>Search the collection to open a person’s record, family connections, and family tree.</p>
+        <p>Browse or search the collection to open a person’s record, family connections, and family tree.</p>
       </div>
 
       <div id="record-content" hidden>

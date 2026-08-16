@@ -349,6 +349,80 @@ def search_people(
         return [_person_summary(row) for row in rows]
 
 
+def list_people(
+    source: DatabaseSource,
+    dataset_id: Any,
+    *,
+    limit: int = 100,
+    offset: int = 0,
+) -> JsonObject:
+    """Return one alphabetically sorted page of compact person records."""
+
+    limit = max(1, min(int(limit), 500))
+    offset = max(0, int(offset))
+    with _connection(source) as connection:
+        people_table, people_columns, person_id_column = _person_source(connection)
+        if "dataset_id" not in people_columns or person_id_column is None:
+            return {"people": [], "total": 0, "limit": limit, "offset": offset, "has_more": False}
+        selected = [
+            column
+            for column in (
+                "dataset_id",
+                person_id_column,
+                "legacy_id",
+                "prefix",
+                "given_name",
+                "surname",
+                "title",
+                "gender",
+                "birth_date",
+                "birth_sort_date",
+                "death_date",
+                "death_sort_date",
+                "living",
+                "private",
+            )
+            if column in people_columns
+        ]
+        total = int(
+            connection.execute(
+                f"SELECT count(*) FROM {_quote_identifier(people_table)} WHERE dataset_id=?",
+                (dataset_id,),
+            ).fetchone()[0]
+        )
+        surname_column = _first_column(people_columns, "surname")
+        given_column = _first_column(people_columns, "given_names", "given_name")
+        order_parts = [
+            f"CASE WHEN p.{_quote_identifier(column)} IS NULL "
+            f"OR p.{_quote_identifier(column)}='' THEN 1 ELSE 0 END"
+            for column in (surname_column, given_column)
+            if column is not None
+        ]
+        order_parts.extend(
+            f"p.{_quote_identifier(column)} COLLATE NOCASE"
+            for column in (surname_column, given_column)
+            if column is not None
+        )
+        order_parts.append(f"p.{_quote_identifier(person_id_column)}")
+        rows = _fetch_all(
+            connection,
+            "SELECT "
+            + ", ".join(f"p.{_quote_identifier(column)}" for column in selected)
+            + f" FROM {_quote_identifier(people_table)} p WHERE p.dataset_id=? ORDER BY "
+            + ", ".join(order_parts)
+            + " LIMIT ? OFFSET ?",
+            (dataset_id, limit, offset),
+        )
+        people = [_person_summary(row) for row in rows]
+        return {
+            "people": people,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "has_more": offset + len(people) < total,
+        }
+
+
 def get_person(source: DatabaseSource, dataset_id: Any, person_id: Any) -> JsonObject | None:
     """Return a person's identity and basic facts."""
 

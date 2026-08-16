@@ -55,6 +55,11 @@ def test_http_api_static_files_and_traversal_security(tmp_path: Path, merged_db:
 
         _, _, body = _get(f"{base}/api/people/search?dataset=1&q=harbor%20morgan")
         assert [person["person_id"] for person in json.loads(body)] == [3]
+        _, _, body = _get(f"{base}/api/people?dataset=1&limit=2&offset=2")
+        page = json.loads(body)
+        assert page["total"] == 6
+        assert len(page["people"]) == 2
+        assert page["offset"] == 2
         _, _, body = _get(f"{base}/api/people/1/3/family")
         assert json.loads(body)["person"]["person_id"] == 3
 
@@ -78,3 +83,12 @@ def test_read_only_connection_rejects_writes(merged_db: Path) -> None:
             connection.execute("DELETE FROM datasets")
     finally:
         connection.close()
+
+
+def test_packaged_standalone_browser_assets_are_present() -> None:
+    from legacy_family_tree_reader import server
+
+    static = Path(server.__file__).with_name("static")
+    assert (static / "standalone.js").is_file()
+    assert (static / "vendor" / "sql-asm.js").stat().st_size > 1_000_000
+    assert (static / "vendor" / "sql.js.LICENSE").is_file()

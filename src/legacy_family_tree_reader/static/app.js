@@ -2,12 +2,19 @@
 
 const elements = {
   appStatus: document.querySelector("#app-status"),
+  sourceMode: document.querySelector("#source-mode"),
+  databaseFile: document.querySelector("#database-file"),
   dataset: document.querySelector("#dataset-select"),
   searchForm: document.querySelector("#search-form"),
   searchInput: document.querySelector("#search-input"),
   searchButton: document.querySelector("#search-form button"),
   searchState: document.querySelector("#search-state"),
   searchResults: document.querySelector("#search-results"),
+  browseControls: document.querySelector("#browse-controls"),
+  browseAll: document.querySelector("#browse-all"),
+  browsePrevious: document.querySelector("#browse-previous"),
+  browseNext: document.querySelector("#browse-next"),
+  browseCount: document.querySelector("#browse-count"),
   recordEmpty: document.querySelector("#record-empty"),
   recordContent: document.querySelector("#record-content"),
   recordState: document.querySelector("#record-state"),
@@ -31,16 +38,29 @@ const elements = {
 };
 
 const state = {
+  transport: null,
+  sourceVersion: 0,
+  startupController: null,
   datasetId: "",
+  datasetsReady: false,
+  catalogMode: "browse",
+  catalogBusy: false,
+  catalogRequestId: 0,
+  browseOffset: 0,
+  browsePeople: [],
+  browseTotal: 0,
+  browseHasMore: false,
   currentPerson: null,
   personA: null,
   personB: null,
   searchTimer: null,
-  searchController: null,
+  catalogController: null,
   recordController: null,
   treeController: null,
   relationshipController: null
 };
+
+const BROWSE_PAGE_SIZE = 100;
 
 function element(tag, options = {}, children = []) {
   const node = document.createElement(tag);
@@ -131,103 +151,260 @@ function datasetName(dataset) {
   return String(firstValue(dataset, ["name", "display_name", "label", "source_file_name", "filename", "dataset_id", "id"]) || "Unnamed collection");
 }
 
-async function api(path, controller) {
+class ApiRequestError extends Error {
+  constructor(status, message) {
+    super(message);
+    this.name = "ApiRequestError";
+    this.status = status;
+  }
+}
+
+class ApiFormatError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "ApiFormatError";
+  }
+}
+
+function abortError() {
+  return new DOMException("The request was cancelled", "AbortError");
+}
+
+function redirectToLogin(response, requestedUrl) {
+  const finalUrl = response.url || "";
+  if (response.redirected && finalUrl && finalUrl !== new URL(requestedUrl, window.location.href).href) {
+    window.location.assign(finalUrl);
+  } else {
+    window.location.reload();
+  }
+  throw abortError();
+}
+
+async function fetchJson(path, controller) {
   const response = await fetch(path, {
+    credentials: "same-origin",
     headers: { Accept: "application/json" },
     signal: controller?.signal
   });
-  let data;
+  if (response.status === 401) redirectToLogin(response, path);
+  if (response.redirected && !response.headers.get("Content-Type")?.includes("application/json")) {
+    redirectToLogin(response, path);
+  }
+  let data = null;
+  let parsed = false;
   try {
     data = await response.json();
+    parsed = true;
   } catch {
-    data = null;
+    // A static host may rewrite an unknown API route to its HTML entry page.
   }
   if (!response.ok) {
     const detail = firstValue(data, ["detail", "message", "error"]);
-    throw new Error(detail ? displayValue(detail) : `Request failed (${response.status})`);
+    throw new ApiRequestError(
+      response.status,
+      detail ? displayValue(detail) : `Request failed (${response.status})`
+    );
   }
+  if (!parsed) throw new ApiFormatError("The server returned an unexpected response.");
   return data;
+}
+
+async function api(path, controller) {
+  if (state.transport === "standalone") {
+    if (controller?.signal.aborted) throw abortError();
+    const data = await window.LegacyStandalone.request(path);
+    if (controller?.signal.aborted) throw abortError();
+    return data;
+  }
+  if (state.transport === "server") return fetchJson(path, controller);
+  throw new Error("Choose a SQLite database to open the archive.");
+}
+
+function networkHelp() {
+  if (window.location.protocol === "file:") {
+    return "Choose a database with Open SQLite file.";
+  }
+  return "Could not connect to the archive. Keep `legacy-family-tree browse ...` running in a terminal, then reload this page.";
 }
 
 function errorMessage(error) {
   if (error?.name === "AbortError") return "";
-  return error instanceof Error ? error.message : "The archive could not complete this request.";
+  if (error instanceof TypeError) return networkHelp();
+  if (error instanceof Error && error.message) return error.message.split(/\r?\n/, 1)[0];
+  return "The archive could not complete this request.";
 }
 
-async function loadDatasets() {
-  setMessage(elements.appStatus, "Opening the archive...");
-  try {
-    const payload = await api("/api/datasets");
-    let datasets = listFrom(payload, ["datasets", "items", "results"]);
-    if (!datasets.length && payload && typeof payload === "object" && datasetId(payload)) datasets = [payload];
-    elements.dataset.replaceChildren();
-    if (!datasets.length) {
-      elements.dataset.append(element("option", { text: "No collections available" }));
-      setMessage(elements.appStatus, "No family record collections are available.", "error");
-      return;
-    }
-    datasets.forEach((dataset) => {
-      const option = element("option", { text: datasetName(dataset) });
-      option.value = datasetId(dataset) || datasetName(dataset);
-      elements.dataset.append(option);
-    });
-    elements.dataset.disabled = false;
-    elements.searchInput.disabled = false;
-    elements.searchButton.disabled = false;
-    state.datasetId = elements.dataset.value;
-    setMessage(elements.appStatus, "");
-    elements.searchInput.focus();
-  } catch (error) {
-    elements.dataset.replaceChildren(element("option", { text: "Collections unavailable" }));
-    setMessage(elements.appStatus, `Could not open collections: ${errorMessage(error)}`, "error");
+function setSourceMode(mode) {
+  const labels = {
+    server: "Source: Local Python server",
+    direct: "Source: Direct SQLite file"
+  };
+  elements.sourceMode.textContent = labels[mode] || "Source: Checking archive...";
+}
+
+function updateCatalogControls() {
+  const ready = state.datasetsReady && Boolean(state.datasetId);
+  const busy = state.catalogBusy;
+  elements.dataset.disabled = !ready || busy;
+  elements.searchInput.disabled = !ready || busy;
+  elements.searchButton.disabled = !ready || busy;
+  elements.browseControls.hidden = !ready;
+  elements.browseAll.disabled = !ready || busy;
+  const browsing = ready && state.catalogMode === "browse";
+  elements.browsePrevious.disabled = !browsing || busy || state.browseOffset === 0;
+  elements.browseNext.disabled = !browsing || busy || !state.browseHasMore;
+  elements.searchResults.querySelectorAll("button").forEach((button) => {
+    button.disabled = !ready || busy;
+  });
+  elements.searchResults.setAttribute("aria-busy", String(busy));
+}
+
+async function loadDatasets(payload) {
+  let datasets = listFrom(payload, ["datasets", "items", "results"]);
+  if (!datasets.length && payload && typeof payload === "object" && datasetId(payload)) datasets = [payload];
+  elements.dataset.replaceChildren();
+  state.datasetsReady = false;
+  state.datasetId = "";
+  if (!datasets.length) {
+    elements.dataset.append(element("option", { text: "No collections available" }));
+    updateCatalogControls();
+    setMessage(elements.appStatus, "No family record collections are available.", "error");
+    return;
   }
+  datasets.forEach((dataset) => {
+    const option = element("option", { text: datasetName(dataset) });
+    option.value = datasetId(dataset) || datasetName(dataset);
+    elements.dataset.append(option);
+  });
+  state.datasetsReady = true;
+  state.datasetId = elements.dataset.value;
+  resetForDataset();
+  setMessage(elements.appStatus, "");
+  await loadBrowsePage(0);
 }
 
 function resetForDataset() {
+  clearTimeout(state.searchTimer);
   state.datasetId = elements.dataset.value;
   state.currentPerson = null;
   state.personA = null;
   state.personB = null;
-  state.searchController?.abort();
+  state.catalogController?.abort();
+  state.catalogRequestId += 1;
   state.recordController?.abort();
   state.treeController?.abort();
   state.relationshipController?.abort();
+  state.catalogMode = "browse";
+  state.catalogBusy = false;
+  state.browseOffset = 0;
+  state.browsePeople = [];
+  state.browseTotal = 0;
+  state.browseHasMore = false;
   elements.searchInput.value = "";
   elements.searchResults.replaceChildren();
   elements.recordContent.hidden = true;
   elements.recordEmpty.hidden = false;
   elements.relationshipResult.replaceChildren();
-  setMessage(elements.searchState, "Search this collection by name.");
+  elements.browseCount.textContent = "";
+  setMessage(elements.searchState, "Loading people...");
   setMessage(elements.recordState);
   setMessage(elements.treeState);
   setMessage(elements.relationshipState);
   updateRelationshipCards();
-  elements.searchInput.focus();
+  updateCatalogControls();
 }
 
 async function searchPeople(query) {
   const trimmed = query.trim();
-  state.searchController?.abort();
+  state.catalogController?.abort();
   elements.searchResults.replaceChildren();
   if (!trimmed) {
-    setMessage(elements.searchState, "Enter part of a name to search.");
+    showCurrentBrowsePage();
     return;
   }
-  state.searchController = new AbortController();
+  const requestId = ++state.catalogRequestId;
+  state.catalogController = new AbortController();
+  const controller = state.catalogController;
+  state.catalogMode = "search";
+  elements.searchResults.setAttribute("aria-label", "Search results");
+  state.catalogBusy = true;
+  updateCatalogControls();
   setMessage(elements.searchState, "Searching the index...");
   try {
     const params = new URLSearchParams({ dataset_id: state.datasetId, q: trimmed, limit: "50" });
-    const payload = await api(`/api/people/search?${params}`, state.searchController);
+    const payload = await api(`/api/people/search?${params}`, controller);
+    if (controller.signal.aborted || requestId !== state.catalogRequestId) return;
     const people = listFrom(payload, ["people", "results", "items", "matches"]);
-    renderSearchResults(people);
+    renderPeopleResults(people);
     setMessage(elements.searchState, people.length ? `${people.length} ${people.length === 1 ? "person" : "people"} found.` : "No matching people found. Try fewer letters or another spelling.");
   } catch (error) {
     const message = errorMessage(error);
     if (message) setMessage(elements.searchState, `Search failed: ${message}`, "error");
+  } finally {
+    if (requestId === state.catalogRequestId) {
+      state.catalogBusy = false;
+      updateCatalogControls();
+    }
   }
 }
 
-function renderSearchResults(people) {
+async function loadBrowsePage(offset) {
+  state.catalogController?.abort();
+  const requestId = ++state.catalogRequestId;
+  const datasetAtStart = state.datasetId;
+  state.catalogController = new AbortController();
+  const controller = state.catalogController;
+  state.catalogMode = "browse";
+  state.catalogBusy = true;
+  elements.searchResults.replaceChildren();
+  setMessage(elements.searchState, "Loading people...");
+  updateCatalogControls();
+  try {
+    const params = new URLSearchParams({
+      dataset_id: datasetAtStart,
+      limit: String(BROWSE_PAGE_SIZE),
+      offset: String(Math.max(0, offset))
+    });
+    const payload = await api(`/api/people?${params}`, controller);
+    if (controller.signal.aborted || requestId !== state.catalogRequestId || datasetAtStart !== state.datasetId) return;
+    const people = listFrom(payload, ["people", "results", "items"]);
+    const payloadOffset = Number(firstValue(payload, ["offset"]));
+    const payloadTotal = Number(firstValue(payload, ["total", "count"]));
+    state.browseOffset = Number.isFinite(payloadOffset) ? payloadOffset : Math.max(0, offset);
+    state.browseTotal = Number.isFinite(payloadTotal) ? payloadTotal : state.browseOffset + people.length;
+    state.browseHasMore = typeof payload?.has_more === "boolean"
+      ? payload.has_more
+      : state.browseOffset + people.length < state.browseTotal;
+    state.browsePeople = people;
+    showCurrentBrowsePage();
+  } catch (error) {
+    const message = errorMessage(error);
+    if (message) setMessage(elements.searchState, `People could not be loaded: ${message}`, "error");
+  } finally {
+    if (requestId === state.catalogRequestId) {
+      state.catalogBusy = false;
+      updateCatalogControls();
+    }
+  }
+}
+
+function showCurrentBrowsePage() {
+  state.catalogMode = "browse";
+  renderPeopleResults(state.browsePeople);
+  elements.searchResults.setAttribute("aria-label", "People in this collection");
+  const first = state.browsePeople.length ? state.browseOffset + 1 : 0;
+  const last = state.browseOffset + state.browsePeople.length;
+  const page = Math.floor(state.browseOffset / BROWSE_PAGE_SIZE) + 1;
+  const pages = Math.max(1, Math.ceil(state.browseTotal / BROWSE_PAGE_SIZE));
+  elements.browseCount.textContent = `Page ${page} of ${pages}; rows ${first}-${last} of ${state.browseTotal}`;
+  setMessage(
+    elements.searchState,
+    state.browsePeople.length ? `Showing rows ${first}-${last} of ${state.browseTotal}.` : "No people are recorded in this collection."
+  );
+  updateCatalogControls();
+}
+
+function renderPeopleResults(people) {
   const fragment = document.createDocumentFragment();
   people.forEach((person) => {
     const openButton = element("button", { className: "result-open", type: "button" }, [
@@ -247,6 +424,93 @@ function renderSearchResults(people) {
     ]));
   });
   elements.searchResults.replaceChildren(fragment);
+}
+
+function cancelActiveRequests() {
+  clearTimeout(state.searchTimer);
+  state.catalogController?.abort();
+  state.recordController?.abort();
+  state.treeController?.abort();
+  state.relationshipController?.abort();
+  state.catalogRequestId += 1;
+  state.catalogBusy = false;
+}
+
+async function activateStandalone(file, sourceKind, version, description) {
+  let opened = false;
+  elements.databaseFile.disabled = true;
+  state.catalogBusy = true;
+  updateCatalogControls();
+  setMessage(elements.appStatus, description);
+  try {
+    if (!window.LegacyStandalone) throw new Error("The in-browser SQLite reader could not be loaded.");
+    await window.LegacyStandalone.open(file);
+    opened = true;
+    if (version !== state.sourceVersion) return;
+    state.transport = "standalone";
+    setSourceMode(sourceKind);
+    const payload = await window.LegacyStandalone.request("/api/datasets");
+    if (version !== state.sourceVersion) return;
+    await loadDatasets(payload);
+  } catch (error) {
+    if (version !== state.sourceVersion || error?.name === "AbortError") return;
+    const message = errorMessage(error);
+    if (opened || !state.datasetsReady) {
+      elements.dataset.replaceChildren(element("option", { text: "Collections unavailable" }));
+      state.datasetsReady = false;
+    }
+    state.catalogBusy = false;
+    updateCatalogControls();
+    setMessage(elements.appStatus, `Could not open the SQLite database: ${message}`, "error");
+  } finally {
+    if (version === state.sourceVersion) elements.databaseFile.disabled = false;
+  }
+}
+
+async function openSelectedFile(file) {
+  if (!file) return;
+  state.startupController?.abort();
+  const version = ++state.sourceVersion;
+  cancelActiveRequests();
+  await activateStandalone(
+    file,
+    "direct",
+    version,
+    `Opening ${file.name || "SQLite database"} read-only in memory...`
+  );
+}
+
+async function initializeHttp() {
+  const version = ++state.sourceVersion;
+  const controller = new AbortController();
+  state.startupController = controller;
+  setMessage(elements.appStatus, "Connecting to the local archive server...");
+  try {
+    const payload = await fetchJson("/api/datasets", controller);
+    if (version !== state.sourceVersion) return;
+    state.transport = "server";
+    setSourceMode("server");
+    await loadDatasets(payload);
+    return;
+  } catch (serverError) {
+    if (serverError?.name === "AbortError" || version !== state.sourceVersion) return;
+    state.transport = "server";
+    setSourceMode("server");
+    elements.dataset.replaceChildren(element("option", { text: "Collections unavailable" }));
+    setMessage(elements.appStatus, `Could not open collections: ${errorMessage(serverError)}`, "error");
+  }
+}
+
+function initialize() {
+  if (window.location.protocol === "file:") {
+    state.transport = "standalone";
+    setSourceMode("direct");
+    elements.dataset.replaceChildren(element("option", { text: "Choose a SQLite database" }));
+    setMessage(elements.appStatus, "Choose a database with Open SQLite file. It will stay read-only in this browser.");
+    updateCatalogControls();
+    return;
+  }
+  initializeHttp();
 }
 
 async function openPerson(summary) {
@@ -659,7 +923,15 @@ function renderFlatTree(nodes) {
   elements.tree.replaceChildren(...sections);
 }
 
-elements.dataset.addEventListener("change", resetForDataset);
+elements.databaseFile.addEventListener("change", async () => {
+  const file = elements.databaseFile.files?.[0];
+  await openSelectedFile(file);
+  elements.databaseFile.value = "";
+});
+elements.dataset.addEventListener("change", () => {
+  resetForDataset();
+  loadBrowsePage(0);
+});
 elements.searchForm.addEventListener("submit", (event) => {
   event.preventDefault();
   clearTimeout(state.searchTimer);
@@ -669,12 +941,26 @@ elements.searchInput.addEventListener("input", () => {
   clearTimeout(state.searchTimer);
   const query = elements.searchInput.value;
   if (!query.trim()) {
-    state.searchController?.abort();
-    elements.searchResults.replaceChildren();
-    setMessage(elements.searchState, "Enter part of a name to search.");
+    state.catalogController?.abort();
+    state.catalogRequestId += 1;
+    state.catalogBusy = false;
+    showCurrentBrowsePage();
     return;
   }
+  state.catalogMode = "search";
+  updateCatalogControls();
   state.searchTimer = setTimeout(() => searchPeople(query), 350);
+});
+elements.browseAll.addEventListener("click", () => {
+  clearTimeout(state.searchTimer);
+  elements.searchInput.value = "";
+  loadBrowsePage(0);
+});
+elements.browsePrevious.addEventListener("click", () => {
+  loadBrowsePage(Math.max(0, state.browseOffset - BROWSE_PAGE_SIZE));
+});
+elements.browseNext.addEventListener("click", () => {
+  if (state.browseHasMore) loadBrowsePage(state.browseOffset + BROWSE_PAGE_SIZE);
 });
 elements.setPersonA.addEventListener("click", () => setRelationshipPerson("A", state.currentPerson));
 elements.setPersonB.addEventListener("click", () => setRelationshipPerson("B", state.currentPerson));
@@ -684,4 +970,4 @@ elements.treeForm.addEventListener("submit", (event) => {
   loadTree();
 });
 
-loadDatasets();
+initialize();

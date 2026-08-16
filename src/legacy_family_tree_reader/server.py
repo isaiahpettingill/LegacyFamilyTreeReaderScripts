@@ -22,6 +22,7 @@ from .queries import (
     get_person_facts,
     get_tree,
     list_datasets,
+    list_people,
     search_people,
     shortest_relationship_path,
 )
@@ -46,7 +47,7 @@ def _first(parameters: dict[str, list[str]], *names: str) -> str | None:
 
 def _handler(database_path: Path, static_root: Path) -> type[BaseHTTPRequestHandler]:
     class RequestHandler(BaseHTTPRequestHandler):
-        server_version = "LegacyFamilyTreeReader/0.1"
+        server_version = "LegacyFamilyTreeReader/0.2"
 
         def do_GET(self) -> None:
             parsed = urlsplit(self.path)
@@ -73,6 +74,22 @@ def _handler(database_path: Path, static_root: Path) -> type[BaseHTTPRequestHand
                             _identifier(dataset),
                             query,
                             limit=int(limit_text),
+                        )
+                    )
+                    return
+                if path == "/api/people":
+                    dataset = _first(parameters, "dataset", "dataset_id")
+                    if dataset is None:
+                        self._bad_request("dataset query parameter is required")
+                        return
+                    limit = int(_first(parameters, "limit") or "100")
+                    offset = int(_first(parameters, "offset") or "0")
+                    self._send_json(
+                        list_people(
+                            database_path,
+                            _identifier(dataset),
+                            limit=limit,
+                            offset=offset,
                         )
                     )
                     return

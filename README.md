@@ -158,6 +158,24 @@ analytics, or upload step; data stays on the machine unless you deliberately
 copy an output or expose the HTTP server. `--no-browser` suppresses automatic
 browser launch, and `--port` changes the port.
 
+The people index opens immediately without requiring a search. It retrieves 100
+alphabetically sorted people at a time and provides Previous/Next controls, so
+large trees do not create tens of thousands of browser elements. Name search
+remains available and includes alternate names.
+
+The static browser can also open a descriptive SQLite database directly,
+without running the Python server. Open
+`src/legacy_family_tree_reader/static/index.html` in a browser, choose **Open
+SQLite file**, and select the generated database. The bundled SQL.js reader
+loads it read-only into browser memory; it does not upload the file or use an
+API. The Python server mode is preferable for very large databases because
+direct mode holds the complete SQLite file in memory.
+
+If the page reports that it cannot connect, either choose a SQLite file in
+direct mode or make sure the `legacy-family-tree browse ...` process is still
+running and open the exact URL printed in that terminal. Opening a stale
+`http://127.0.0.1:8765/` tab after stopping the process cannot work.
+
 The default loopback host is local-only. Changing `--host` to `0.0.0.0`, `::`,
 or another network interface exposes unencrypted genealogy data to that
 network; the server provides no authentication or TLS. Treat imported
@@ -229,6 +247,8 @@ equivalent.
   and computes conservative suggestions.
 - `server.py` exposes the read-only query layer and packaged browser assets over
   a local HTTP server.
+- `static/standalone.js` uses the bundled SQL.js runtime for a direct,
+  API-free local-file mode.
 - `exporters.py` produces GEDCOM 5.5.1 and query-friendly Excel workbooks.
 - `build_tools.py` and `scripts/build-mdbtools-llvm.sh` provide the LLVM
   `mdbtools` build path.
@@ -306,3 +326,7 @@ synthetic, generic records.
 
 Legacy Family Tree Reader Scripts is licensed under the GNU General Public
 License, version 2 only. See [LICENSE](LICENSE).
+
+The browser bundles SQL.js 1.13.0 under its MIT license. See
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) and the license distributed
+with the browser assets.
