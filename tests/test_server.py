@@ -92,3 +92,7 @@ def test_packaged_standalone_browser_assets_are_present() -> None:
     assert (static / "standalone.js").is_file()
     assert (static / "vendor" / "sql-asm.js").stat().st_size > 1_000_000
     assert (static / "vendor" / "sql.js.LICENSE").is_file()
+
+    app = (static / "app.js").read_text(encoding="utf-8")
+    assert "elements.searchInput.disabled = !ready;" in app
+    assert "elements.searchInput.disabled = !ready || busy;" not in app

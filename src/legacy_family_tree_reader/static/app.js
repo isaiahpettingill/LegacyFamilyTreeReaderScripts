@@ -246,7 +246,8 @@ function updateCatalogControls() {
   const ready = state.datasetsReady && Boolean(state.datasetId);
   const busy = state.catalogBusy;
   elements.dataset.disabled = !ready || busy;
-  elements.searchInput.disabled = !ready || busy;
+  // Disabling a focused input makes browsers blur it during every live search.
+  elements.searchInput.disabled = !ready;
   elements.searchButton.disabled = !ready || busy;
   elements.browseControls.hidden = !ready;
   elements.browseAll.disabled = !ready || busy;
@@ -939,11 +940,11 @@ elements.searchForm.addEventListener("submit", (event) => {
 });
 elements.searchInput.addEventListener("input", () => {
   clearTimeout(state.searchTimer);
+  state.catalogController?.abort();
+  state.catalogRequestId += 1;
+  state.catalogBusy = false;
   const query = elements.searchInput.value;
   if (!query.trim()) {
-    state.catalogController?.abort();
-    state.catalogRequestId += 1;
-    state.catalogBusy = false;
     showCurrentBrowsePage();
     return;
   }
