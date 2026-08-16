@@ -1,0 +1,80 @@
+from __future__ import annotations
+
+import json
+import sqlite3
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
+from http.server import ThreadingHTTPServer
+from pathlib import Path
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
+
+import pytest
+
+from legacy_family_tree_reader.queries import connect_read_only
+from legacy_family_tree_reader.server import _handler
+
+
+@contextmanager
+def _running_server(database: Path, static_root: Path) -> Iterator[str]:
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _handler(database, static_root))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def _get(url: str) -> tuple[int, dict[str, str], bytes]:
+    with urlopen(url, timeout=2) as response:
+        return response.status, dict(response.headers), response.read()
+
+
+def test_http_api_static_files_and_traversal_security(tmp_path: Path, merged_db: Path) -> None:
+    static = tmp_path / "static"
+    static.mkdir()
+    (static / "index.html").write_text("synthetic home", encoding="ascii")
+    (static / "app.js").write_text("const synthetic = true;", encoding="ascii")
+    secret = tmp_path / "secret.txt"
+    secret.write_text("not public", encoding="ascii")
+
+    with _running_server(merged_db, static.resolve()) as base:
+        status, headers, body = _get(f"{base}/")
+        assert status == 200
+        assert body == b"synthetic home"
+        assert headers["X-Content-Type-Options"] == "nosniff"
+
+        status, headers, body = _get(f"{base}/api/datasets")
+        assert status == 200
+        assert headers["Cache-Control"] == "no-store"
+        assert len(json.loads(body)) == 2
+
+        _, _, body = _get(f"{base}/api/people/search?dataset=1&q=harbor%20morgan")
+        assert [person["person_id"] for person in json.loads(body)] == [3]
+        _, _, body = _get(f"{base}/api/people/1/3/family")
+        assert json.loads(body)["person"]["person_id"] == 3
+
+        for path in ("/%2e%2e/secret.txt", "/..%2fsecret.txt", "/missing.txt"):
+            with pytest.raises(HTTPError) as error:
+                _get(base + path)
+            assert error.value.code == 404
+        with pytest.raises(HTTPError) as error:
+            _get(f"{base}/api/people/search?q=missing-dataset")
+        assert error.value.code == 400
+        with pytest.raises(HTTPError) as error:
+            urlopen(Request(f"{base}/api/datasets", method="POST"), timeout=2)
+        assert error.value.code == 501
+
+
+def test_read_only_connection_rejects_writes(merged_db: Path) -> None:
+    connection = connect_read_only(merged_db)
+    try:
+        assert connection.execute("PRAGMA query_only").fetchone() == (1,)
+        with pytest.raises(sqlite3.OperationalError, match="readonly|read-only"):
+            connection.execute("DELETE FROM datasets")
+    finally:
+        connection.close()

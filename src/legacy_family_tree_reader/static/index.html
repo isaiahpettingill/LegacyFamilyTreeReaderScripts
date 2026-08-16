@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Legacy Family Archive</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main-content">Skip to family records</a>
+
+  <header class="masthead">
+    <div class="masthead-mark" aria-hidden="true">LF</div>
+    <div class="masthead-title">
+      <p class="eyebrow">A private family reference</p>
+      <h1>Legacy Family Archive</h1>
+    </div>
+    <div class="dataset-control">
+      <label for="dataset-select">Record collection</label>
+      <select id="dataset-select" disabled>
+        <option>Loading collections...</option>
+      </select>
+    </div>
+  </header>
+
+  <div id="app-status" class="app-status" role="status" aria-live="polite">Opening the archive...</div>
+
+  <main id="main-content" class="workspace">
+    <aside class="catalog" aria-labelledby="search-heading">
+      <div class="section-heading">
+        <p class="folio">Index</p>
+        <h2 id="search-heading">Find a person</h2>
+      </div>
+      <form id="search-form" role="search">
+        <label for="search-input">Name</label>
+        <div class="search-row">
+          <input id="search-input" name="q" type="search" autocomplete="off" spellcheck="false" placeholder="Surname or given name" disabled>
+          <button type="submit" disabled>Search</button>
+        </div>
+        <p class="hint">Partial names and approximate spelling are welcome.</p>
+      </form>
+      <div id="search-state" class="inline-state" aria-live="polite"></div>
+      <ol id="search-results" class="search-results" aria-label="People found"></ol>
+    </aside>
+
+    <article id="record" class="record" aria-labelledby="record-title">
+      <div id="record-empty" class="record-empty">
+        <p class="folio">Reading room</p>
+        <h2 id="record-title">Select a name from the index</h2>
+        <p>Search the collection to open a person’s record, family connections, and family tree.</p>
+      </div>
+
+      <div id="record-content" hidden>
+        <header class="person-header">
+          <div>
+            <p id="person-kicker" class="folio">Person record</p>
+            <h2 id="person-name"></h2>
+            <p id="person-lifespan" class="lifespan"></p>
+          </div>
+          <div class="person-actions" aria-label="Relationship selection">
+            <button id="set-person-a" class="quiet-button" type="button">Use as person A</button>
+            <button id="set-person-b" class="quiet-button" type="button">Use as person B</button>
+          </div>
+        </header>
+
+        <div id="record-state" class="inline-state" role="status" aria-live="polite"></div>
+
+        <section class="record-section" aria-labelledby="overview-heading">
+          <div class="section-heading ruled">
+            <p class="folio">I</p>
+            <h3 id="overview-heading">Overview</h3>
+          </div>
+          <dl id="person-overview" class="overview-list"></dl>
+        </section>
+
+        <section class="record-section" aria-labelledby="facts-heading">
+          <div class="section-heading ruled">
+            <p class="folio">II</p>
+            <h3 id="facts-heading">Facts &amp; notes</h3>
+          </div>
+          <div id="facts-content"></div>
+        </section>
+
+        <section class="record-section" aria-labelledby="family-heading">
+          <div class="section-heading ruled">
+            <p class="folio">III</p>
+            <h3 id="family-heading">Immediate family</h3>
+          </div>
+          <div id="family-content" class="family-grid"></div>
+        </section>
+
+        <section class="record-section" aria-labelledby="tree-heading">
+          <div class="section-heading ruled">
+            <p class="folio">IV</p>
+            <h3 id="tree-heading">Family tree</h3>
+          </div>
+          <form id="tree-form" class="tree-controls">
+            <fieldset>
+              <legend>Direction</legend>
+              <label><input type="radio" name="direction" value="ancestors" checked> Ancestors</label>
+              <label><input type="radio" name="direction" value="descendants"> Descendants</label>
+            </fieldset>
+            <label for="generations-select">Generations
+              <select id="generations-select">
+                <option value="2">2</option>
+                <option value="3" selected>3</option>
+                <option value="4">4</option>
+                <option value="5">5</option>
+                <option value="6">6</option>
+              </select>
+            </label>
+            <button type="submit">Draw tree</button>
+          </form>
+          <div id="tree-state" class="inline-state" role="status" aria-live="polite"></div>
+          <div id="tree-content" class="tree-content"></div>
+        </section>
+      </div>
+    </article>
+  </main>
+
+  <section class="relationship-ledger" aria-labelledby="relationship-heading">
+    <div class="relationship-intro">
+      <p class="folio">Connection ledger</p>
+      <h2 id="relationship-heading">How are they related?</h2>
+      <p>Assign people from the index or from an open record, then trace the shortest known path.</p>
+    </div>
+    <div class="relationship-work">
+      <div class="relationship-picks">
+        <div id="person-a-card" class="person-pick"><span>Person A</span><strong>Not selected</strong></div>
+        <div class="connection-line" aria-hidden="true"></div>
+        <div id="person-b-card" class="person-pick"><span>Person B</span><strong>Not selected</strong></div>
+      </div>
+      <button id="find-relationship" class="primary-button" type="button" disabled>Explain relationship</button>
+      <div id="relationship-state" class="inline-state" role="status" aria-live="polite"></div>
+      <div id="relationship-result" class="relationship-result"></div>
+    </div>
+  </section>
+
+  <footer>
+    <p>Read-only archive viewer</p>
+  </footer>
+</body>
+</html>

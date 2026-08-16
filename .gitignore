@@ -1,0 +1,13 @@
+*.db
+*.sqlite
+*.sqlite3
+*.fdb
+*.hdb
+*.ged
+*.xlsx
+.DS_Store
+.pytest_cache/
+.ruff_cache/
+.venv/
+__pycache__/
+dist/
