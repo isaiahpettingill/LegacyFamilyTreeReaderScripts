@@ -264,17 +264,18 @@ QQDDMMYYYYFFFFFFFF
   dates.
 - `FFFFFFFF` contains flags or reserved data.
 
-The display helper decodes this form only when `QQ` and `FFFFFFFF` are all zero
-and the remaining calendar components are valid. It also recognizes positive
-eight-digit `YYYYMMDD` values. Empty values and sentinels `0`, `-99999999`, and
-`99999999` display as missing. A year-only or year/month value is allowed.
+The display helper decodes this form when `FFFFFFFF` is zero, the calendar
+components are valid, and `QQ` is either `00` (exact) or `10` (Legacy's
+approximate-date qualifier). It also recognizes positive eight-digit
+`YYYYMMDD` values. Empty values and sentinels `0`, `-99999999`, and `99999999`
+display as missing. A year-only or year/month value is allowed.
 
-Qualified, ranged, flagged, malformed, or unknown values are returned unchanged
-by JSON display queries. GEDCOM export converts only unambiguous values and
-writes unsupported raw values as `Legacy date:` notes. Sort keys exist for
-ordering and matching; they are not proof of the exact display date or
-qualifier. Always preserve and inspect the raw `*_date` value before making a
-genealogical conclusion.
+Other qualified, ranged, flagged, malformed, or unknown values are returned
+unchanged by JSON display queries. GEDCOM export converts only unambiguous
+values and writes unsupported raw values as `Legacy date:` notes. Sort keys
+exist for ordering and matching; they are not proof of the exact display date
+or qualifier. Always preserve and inspect the raw `*_date` value before making
+a genealogical conclusion.
 
 ## Schema Metadata
 

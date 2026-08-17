@@ -162,6 +162,9 @@ def _normalize_person(person: JsonObject) -> JsonObject:
     }
     for target, sources in aliases.items():
         _add_alias(result, target, *sources)
+    for name, value in tuple(result.items()):
+        if name.endswith("_date") and not name.endswith("_sort_date"):
+            result[f"{name}_display"] = decode_legacy_date(value)
     result["birth_date_display"] = decode_legacy_date(result.get("birth_legacy_date"))
     result["death_date_display"] = decode_legacy_date(result.get("death_legacy_date"))
     return result
@@ -305,15 +308,45 @@ def search_people(
                 clauses.append("(" + " OR ".join(term_clauses) + ")")
         if not clauses:
             return []
-        parameters.append(limit)
         surname_column = _first_column(people_columns, "surname")
         given_column = _first_column(people_columns, "given_names", "given_name")
-        order_parts = [
+        order_parts: list[str] = []
+        normalized_query = " ".join(query.split())
+        if given_column and surname_column:
+            given = f"COALESCE(p.{_quote_identifier(given_column)}, '')"
+            surname = f"COALESCE(p.{_quote_identifier(surname_column)}, '')"
+            primary_short = f"trim({given} || ' ' || {surname})"
+            primary_reverse = f"trim({surname} || ' ' || {given})"
+            primary_term_matches = " AND ".join(
+                f"({primary_expression}) LIKE ? ESCAPE '\\' COLLATE NOCASE" for _ in terms
+            )
+            order_parts.append(
+                "CASE "
+                f"WHEN {primary_short} = ? COLLATE NOCASE "
+                f"OR {primary_reverse} = ? COLLATE NOCASE THEN 0 "
+                f"WHEN {given} = ? COLLATE NOCASE OR {surname} = ? COLLATE NOCASE THEN 1 "
+                f"WHEN {primary_short} LIKE ? ESCAPE '\\' COLLATE NOCASE "
+                f"OR {primary_reverse} LIKE ? ESCAPE '\\' COLLATE NOCASE THEN 2 "
+                f"WHEN {primary_term_matches} THEN 3 ELSE 4 END"
+            )
+            parameters.extend(
+                (
+                    normalized_query,
+                    normalized_query,
+                    normalized_query,
+                    normalized_query,
+                    _like_term(normalized_query).removeprefix("%"),
+                    _like_term(normalized_query).removeprefix("%"),
+                    *terms,
+                )
+            )
+        order_parts.extend(
             f"COALESCE(p.{_quote_identifier(column)}, '')"
             for column in (surname_column, given_column)
             if column is not None
-        ]
+        )
         order_parts.append(f"p.{_quote_identifier(person_id_column)}")
+        parameters.append(limit)
         selected = [
             column
             for column in (

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -26,6 +27,7 @@ from legacy_family_tree_reader.queries import (
         ("000407197500000000", "1975-07-04"),
         ("000007197500000000", "1975-07"),
         ("000000197500000000", "1975"),
+        ("100000176300000000", "about 1763"),
         (19750704, "1975-07-04"),
         ("011503195000000000", "011503195000000000"),
         ("003202197500000000", "003202197500000000"),
@@ -47,6 +49,18 @@ def test_tokenized_primary_and_alternate_name_search_is_dataset_scoped(merged_db
     assert search_people(merged_db, 2, "Casey") == []
     assert search_people(merged_db, 1, "%") == []
     assert search_people(merged_db, 1, "   ") == []
+
+
+def test_primary_name_match_ranks_ahead_of_alternate_name_match(merged_db: Path) -> None:
+    with sqlite3.connect(merged_db) as connection:
+        connection.execute(
+            """INSERT INTO alternate_names
+               (dataset_id, alternate_name_id, individual_id, given_name, surname)
+               VALUES (1, 999, 4, 'Casey Rowan', 'Branch')"""
+        )
+
+    results = search_people(merged_db, 1, "Casey Rowan Branch")
+    assert [row["person_id"] for row in results[:2]] == [3, 4]
 
 
 def test_people_list_is_alphabetical_and_paginated(merged_db: Path) -> None:

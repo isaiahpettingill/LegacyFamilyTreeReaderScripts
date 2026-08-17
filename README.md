@@ -161,7 +161,8 @@ browser launch, and `--port` changes the port.
 The people index opens immediately without requiring a search. It retrieves 100
 alphabetically sorted people at a time and provides Previous/Next controls, so
 large trees do not create tens of thousands of browser elements. Name search
-remains available and includes alternate names.
+remains available and includes alternate names, while exact and partial primary
+given-name/surname matches rank ahead of alternate-name matches.
 
 The static browser can also open a descriptive SQLite database directly,
 without running the Python server. Open

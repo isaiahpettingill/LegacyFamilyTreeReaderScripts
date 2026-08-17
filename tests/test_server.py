@@ -96,3 +96,5 @@ def test_packaged_standalone_browser_assets_are_present() -> None:
     app = (static / "app.js").read_text(encoding="utf-8")
     assert "elements.searchInput.disabled = !ready;" in app
     assert "elements.searchInput.disabled = !ready || busy;" not in app
+    assert 'if (["0", "m", "male"].includes(code)) return "M";' in app
+    assert 'if (["1", "f", "female"].includes(code)) return "F";' in app

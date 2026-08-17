@@ -123,8 +123,9 @@
 
     let match = /^(\d{2})(\d{2})(\d{2})(\d{4})(\d{8})$/.exec(text);
     if (match) {
-      if (match[1] !== "00" || match[5] !== "00000000") return text;
-      return formatDateParts(Number(match[4]), Number(match[3]), Number(match[2]), text);
+      if (!["00", "10"].includes(match[1]) || match[5] !== "00000000") return text;
+      const display = formatDateParts(Number(match[4]), Number(match[3]), Number(match[2]), text);
+      return match[1] === "10" ? `about ${display}` : display;
     }
     match = /^(\d{4})(\d{2})(\d{2})$/.exec(text);
     if (match) return formatDateParts(Number(match[1]), Number(match[2]), Number(match[3]), text);
@@ -287,12 +288,36 @@
       ))`);
       values.push(term, term);
     });
+    const normalizedQuery = String(query).trim().replace(/\s+/g, " ");
+    const prefixTerm = `${normalizedQuery.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_")}%`;
+    const primaryTerms = terms
+      .map(() => `(${primaryName}) LIKE ? ESCAPE '\\' COLLATE NOCASE`)
+      .join(" AND ");
+    values.push(
+      normalizedQuery,
+      normalizedQuery,
+      normalizedQuery,
+      normalizedQuery,
+      prefixTerm,
+      prefixTerm,
+      ...terms
+    );
     values.push(limit);
     return all(
       `SELECT ${COMPACT_PERSON_COLUMNS} FROM individuals p
        WHERE p.dataset_id = ? AND ${clauses.join(" AND ")}
-       ORDER BY CASE WHEN p.surname IS NULL OR p.surname = '' THEN 1 ELSE 0 END,
-                p.surname COLLATE NOCASE,
+       ORDER BY CASE
+                  WHEN trim(COALESCE(p.given_name, '') || ' ' || COALESCE(p.surname, '')) = ? COLLATE NOCASE
+                    OR trim(COALESCE(p.surname, '') || ' ' || COALESCE(p.given_name, '')) = ? COLLATE NOCASE THEN 0
+                  WHEN COALESCE(p.given_name, '') = ? COLLATE NOCASE
+                    OR COALESCE(p.surname, '') = ? COLLATE NOCASE THEN 1
+                  WHEN trim(COALESCE(p.given_name, '') || ' ' || COALESCE(p.surname, '')) LIKE ? ESCAPE '\\' COLLATE NOCASE
+                    OR trim(COALESCE(p.surname, '') || ' ' || COALESCE(p.given_name, '')) LIKE ? ESCAPE '\\' COLLATE NOCASE THEN 2
+                  WHEN ${primaryTerms} THEN 3
+                  ELSE 4
+                END,
+                CASE WHEN p.surname IS NULL OR p.surname = '' THEN 1 ELSE 0 END,
+                 p.surname COLLATE NOCASE,
                 CASE WHEN p.given_name IS NULL OR p.given_name = '' THEN 1 ELSE 0 END,
                 p.given_name COLLATE NOCASE, p.individual_id
        LIMIT ?`,

@@ -16,10 +16,11 @@ def decode_legacy_date(value: object) -> str | None:
     """Return a readable date only when a Legacy value can be decoded safely.
 
     Legacy ``*D`` fields commonly contain 18 digits: a two-digit qualifier,
-    day, month, year, and eight flag/reserved digits.  Only qualifier zero and
-    a zero tail are interpreted here; qualified/ranged dates are returned
-    unchanged rather than guessed.  Positive ``YYYYMMDD`` sort dates are also
-    accepted.  Missing/sentinel values return ``None``.
+    day, month, year, and eight flag/reserved digits. Exact dates and Legacy's
+    well-established ``10`` approximate-date qualifier are interpreted when the
+    flag tail is zero; other qualified/ranged dates are returned unchanged.
+    Positive ``YYYYMMDD`` sort dates are also accepted. Missing/sentinel values
+    return ``None``.
     """
 
     if value is None:
@@ -30,9 +31,10 @@ def decode_legacy_date(value: object) -> str | None:
 
     match = _PACKED_DISPLAY.fullmatch(text)
     if match:
-        if match["qualifier"] != "00" or match["tail"] != "00000000":
+        if match["tail"] != "00000000" or match["qualifier"] not in {"00", "10"}:
             return text
-        return _format_parts(int(match["year"]), int(match["month"]), int(match["day"]), text)
+        display = _format_parts(int(match["year"]), int(match["month"]), int(match["day"]), text)
+        return f"about {display}" if match["qualifier"] == "10" else display
 
     match = _SORT_DATE.fullmatch(text)
     if match:

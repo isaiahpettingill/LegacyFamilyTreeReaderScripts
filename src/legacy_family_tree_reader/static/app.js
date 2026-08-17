@@ -131,12 +131,50 @@ function displayValue(value) {
   return String(value);
 }
 
+function legacyDateDisplay(value) {
+  const text = displayValue(value).trim();
+  if (!text || ["0", "-99999999", "99999999"].includes(text)) return "";
+  const packed = /^(\d{2})(\d{2})(\d{2})(\d{4})(\d{8})$/.exec(text);
+  if (packed && packed[5] === "00000000" && ["00", "10"].includes(packed[1])) {
+    const year = packed[4];
+    const month = Number(packed[3]);
+    const day = Number(packed[2]);
+    let formatted = year;
+    if (month >= 1 && month <= 12) {
+      formatted += `-${String(month).padStart(2, "0")}`;
+      if (day >= 1 && day <= new Date(Number(year), month, 0).getDate()) {
+        formatted += `-${String(day).padStart(2, "0")}`;
+      }
+    }
+    return packed[1] === "10" ? `about ${formatted}` : formatted;
+  }
+  const sortable = /^(\d{4})(\d{2})(\d{2})$/.exec(text);
+  if (sortable) {
+    const month = Number(sortable[2]);
+    const day = Number(sortable[3]);
+    if (month === 0 && day === 0) return sortable[1];
+    if (month >= 1 && month <= 12 && day === 0) return `${sortable[1]}-${sortable[2]}`;
+    if (month >= 1 && month <= 12 && day >= 1 && day <= new Date(Number(sortable[1]), month, 0).getDate()) {
+      return `${sortable[1]}-${sortable[2]}-${sortable[3]}`;
+    }
+  }
+  return text;
+}
+
+function sexDisplay(value) {
+  const code = displayValue(value).trim().toLowerCase();
+  if (["0", "m", "male"].includes(code)) return "M";
+  if (["1", "f", "female"].includes(code)) return "F";
+  if (["2", "u", "unknown", "unspecified"].includes(code)) return "U";
+  return code.toUpperCase();
+}
+
 function lifeSummary(person) {
   if (!person || typeof person !== "object") return "";
   const direct = firstValue(person, ["lifespan", "life_span", "dates"]);
   if (direct && typeof direct !== "object") return String(direct);
-  const birth = displayValue(firstValue(person, ["birth_date_display", "birth_legacy_date", "birth_date", "birth", "date_of_birth", "BirthDate"]));
-  const death = displayValue(firstValue(person, ["death_date_display", "death_legacy_date", "death_date", "death", "date_of_death", "DeathDate"]));
+  const birth = legacyDateDisplay(firstValue(person, ["birth_date_display", "birth_legacy_date", "birth_date", "birth", "date_of_birth", "BirthDate"]));
+  const death = legacyDateDisplay(firstValue(person, ["death_date_display", "death_legacy_date", "death_date", "death", "date_of_death", "DeathDate"]));
   if (!birth && !death) return "Dates not recorded";
   return `${birth || "?"}–${death || ""}`;
 }
@@ -578,20 +616,20 @@ function renderOverview(person) {
     ["Full name", ["display_name", "full_name", "name"]],
     ["Given names", ["given_names", "given_name", "first_name", "given"]],
     ["Surname", ["surname", "last_name", "family_name"]],
-    ["Sex", ["gender_code", "sex", "gender"]],
-    ["Birth", ["birth_legacy_date", "birth_date", "birth", "date_of_birth"]],
+    ["Sex", ["gender_code", "sex", "gender"], sexDisplay],
+    ["Birth", ["birth_date_display", "birth_legacy_date", "birth_date", "birth", "date_of_birth"], legacyDateDisplay],
     ["Birthplace", ["birth_place", "place_of_birth"]],
-    ["Death", ["death_legacy_date", "death_date", "death", "date_of_death"]],
+    ["Death", ["death_date_display", "death_legacy_date", "death_date", "death", "date_of_death"], legacyDateDisplay],
     ["Death place", ["death_place", "place_of_death"]],
-    ["Burial", ["burial_date", "burial"]],
+    ["Burial", ["burial_date_display", "burial_date", "burial"], legacyDateDisplay],
     ["Burial place", ["burial_place", "cemetery"]],
     ["Legacy RIN", ["legacy_rin"]],
     ["Record ID", ["person_id", "id", "individual_id"]]
   ];
   const rows = [];
   const seen = new Set();
-  fields.forEach(([label, keys]) => {
-    const text = displayValue(firstValue(person, keys));
+  fields.forEach(([label, keys, formatter = displayValue]) => {
+    const text = formatter(firstValue(person, keys));
     if (!text || seen.has(`${label}:${text}`)) return;
     seen.add(`${label}:${text}`);
     rows.push(element("div", {}, [element("dt", { text: label }), element("dd", { text })]));
@@ -646,8 +684,8 @@ function renderFacts(payload) {
   }
   const identity = payload?.identity || payload?.person || {};
   const vitalFacts = [
-    ["Birth", firstValue(identity, ["birth_legacy_date", "birth_date", "date_of_birth"])],
-    ["Death", firstValue(identity, ["death_legacy_date", "death_date", "date_of_death"])]
+    ["Birth", firstValue(identity, ["birth_date_display", "birth_legacy_date", "birth_date", "date_of_birth"])],
+    ["Death", firstValue(identity, ["death_date_display", "death_legacy_date", "death_date", "date_of_death"])]
   ].filter(([, value]) => value !== undefined && value !== null && value !== "")
     .map(([type, date]) => ({ type, date }));
   facts = [...vitalFacts, ...facts];
@@ -660,7 +698,7 @@ function renderFacts(payload) {
         list.append(element("li", { className: "fact-card" }, [element("p", { className: "fact-label", text: "Fact" }), element("p", { className: "fact-detail", text: fact })]));
         return;
       }
-      const date = displayValue(firstValue(fact, ["date", "event_date", "fact_date", "legacy_date", "Date"]));
+      const date = legacyDateDisplay(firstValue(fact, ["date_display", "event_date_display", "date", "event_date", "fact_date", "legacy_date", "Date"]));
       const place = displayValue(firstValue(fact, ["place", "location", "event_place", "location_name", "Place"]));
       const detail = displayValue(firstValue(fact, ["description", "detail", "value", "cause", "address"]));
       const text = [date, place, detail].filter(Boolean).join(" · ") || "No further detail recorded.";
