@@ -30,6 +30,10 @@ const elements = {
   generations: document.querySelector("#generations-select"),
   treeState: document.querySelector("#tree-state"),
   tree: document.querySelector("#tree-content"),
+  treeZoomOut: document.querySelector("#tree-zoom-out"),
+  treeZoomIn: document.querySelector("#tree-zoom-in"),
+  treeZoomReset: document.querySelector("#tree-zoom-reset"),
+  treeZoomLevel: document.querySelector("#tree-zoom-level"),
   personACard: document.querySelector("#person-a-card"),
   personBCard: document.querySelector("#person-b-card"),
   relationshipButton: document.querySelector("#find-relationship"),
@@ -57,10 +61,22 @@ const state = {
   catalogController: null,
   recordController: null,
   treeController: null,
-  relationshipController: null
+  relationshipController: null,
+  routeVersion: 0,
+  treeScale: 1,
+  treeMap: null,
+  treeSurface: null,
+  treeCards: null,
+  treeGraphs: [],
+  treeRootId: ""
 };
 
 const BROWSE_PAGE_SIZE = 100;
+const STATIC_DB_FORMAT = "legacy-family-tree-reader-chunks";
+const STATIC_DB_VERSION = 1;
+const STATIC_DB_NAME = "family-tree.sqlite";
+const SHA256_PATTERN = /^[a-f0-9]{64}$/;
+const ROUTE_ID_PATTERN = /^[^\u0000-\u001f\u007f]{1,256}$/;
 
 function element(tag, options = {}, children = []) {
   const node = document.createElement(tag);
@@ -189,6 +205,112 @@ function datasetName(dataset) {
   return String(firstValue(dataset, ["name", "display_name", "label", "source_file_name", "filename", "dataset_id", "id"]) || "Unnamed collection");
 }
 
+function validRouteId(value) {
+  return typeof value === "string" && ROUTE_ID_PATTERN.test(value) && value !== "." && value !== "..";
+}
+
+function decodeRouteId(value) {
+  try {
+    const decoded = decodeURIComponent(value);
+    return validRouteId(decoded) ? decoded : null;
+  } catch {
+    return null;
+  }
+}
+
+function parseRoute() {
+  const raw = window.location.protocol === "file:"
+    ? window.location.hash.replace(/^#/, "")
+    : window.location.pathname;
+  if (!raw || raw === "/" || (window.location.protocol !== "file:" && /\/index\.html\/?$/.test(raw))) {
+    return { kind: "root" };
+  }
+  const match = /^\/dataset\/([^/]+)\/person\/([^/]+)\/?$/.exec(raw);
+  if (!match) return { kind: "invalid", message: "The archive link is not a recognized person route." };
+  const routeDatasetId = decodeRouteId(match[1]);
+  const routePersonId = decodeRouteId(match[2]);
+  if (!routeDatasetId || !routePersonId) {
+    return { kind: "invalid", message: "The archive link contains an invalid dataset or person identifier." };
+  }
+  return { kind: "person", datasetId: routeDatasetId, personId: routePersonId };
+}
+
+function routeText(route) {
+  if (route.kind !== "person") return "/";
+  return `/dataset/${encodeURIComponent(route.datasetId)}/person/${encodeURIComponent(route.personId)}`;
+}
+
+function writeRoute(route, replace = false) {
+  const path = routeText(route);
+  const target = window.location.protocol === "file:"
+    ? `${window.location.pathname}${window.location.search}#${path}`
+    : path;
+  const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+  if (current === target) return false;
+  window.history[replace ? "replaceState" : "pushState"](null, "", target);
+  return true;
+}
+
+function clearSelectedPerson() {
+  state.routeVersion += 1;
+  state.currentPerson = null;
+  state.recordController?.abort();
+  state.treeController?.abort();
+  elements.recordContent.hidden = true;
+  elements.recordEmpty.hidden = false;
+  elements.tree.replaceChildren();
+  setMessage(elements.recordState);
+  setMessage(elements.treeState);
+}
+
+async function applyRoute(summary = null) {
+  if (!state.datasetsReady) return;
+  const route = parseRoute();
+  if (route.kind === "invalid") {
+    clearSelectedPerson();
+    setMessage(elements.appStatus, `${route.message} Return to the archive root and choose a person.`, "error");
+    return;
+  }
+  if (route.kind === "root") {
+    setMessage(elements.appStatus, "");
+    clearSelectedPerson();
+    return;
+  }
+  const matchingOption = Array.from(elements.dataset.options)
+    .find((option) => option.value === route.datasetId);
+  if (!matchingOption) {
+    clearSelectedPerson();
+    setMessage(elements.appStatus, `Dataset "${route.datasetId}" from this link is not available.`, "error");
+    return;
+  }
+  writeRoute(route, true);
+  setMessage(elements.appStatus, "");
+  if (state.datasetId !== route.datasetId) {
+    elements.dataset.value = route.datasetId;
+    resetForDataset();
+    await loadBrowsePage(0);
+    if (parseRoute().kind !== "person" || parseRoute().datasetId !== route.datasetId) return;
+  }
+  const hint = summary && personId(summary) === route.personId ? summary : { person_id: route.personId };
+  await loadPerson(hint, route);
+}
+
+function openPerson(summary) {
+  const id = personId(summary);
+  if (!validRouteId(id) || !validRouteId(state.datasetId)) {
+    setMessage(elements.searchState, "This person has an invalid identifier and cannot be opened.", "error");
+    return;
+  }
+  const route = { kind: "person", datasetId: state.datasetId, personId: id };
+  const current = parseRoute();
+  if (current.kind === "person" && current.datasetId === route.datasetId && current.personId === id) {
+    loadPerson(summary, route);
+    return;
+  }
+  writeRoute(route);
+  applyRoute(summary);
+}
+
 class ApiRequestError extends Error {
   constructor(status, message) {
     super(message);
@@ -275,7 +397,8 @@ function errorMessage(error) {
 function setSourceMode(mode) {
   const labels = {
     server: "Source: Local Python server",
-    direct: "Source: Direct SQLite file"
+    direct: "Source: Direct SQLite file",
+    static: "Source: Verified static SQLite archive"
   };
   elements.sourceMode.textContent = labels[mode] || "Source: Checking archive...";
 }
@@ -316,10 +439,15 @@ async function loadDatasets(payload) {
     elements.dataset.append(option);
   });
   state.datasetsReady = true;
+  const initialRoute = parseRoute();
+  if (initialRoute.kind === "person" && Array.from(elements.dataset.options).some((option) => option.value === initialRoute.datasetId)) {
+    elements.dataset.value = initialRoute.datasetId;
+  }
   state.datasetId = elements.dataset.value;
   resetForDataset();
   setMessage(elements.appStatus, "");
   await loadBrowsePage(0);
+  await applyRoute();
 }
 
 function resetForDataset() {
@@ -519,24 +647,193 @@ async function openSelectedFile(file) {
   );
 }
 
+function validateStaticManifest(manifest) {
+  if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) {
+    throw new Error("Invalid data manifest: expected a JSON object.");
+  }
+  if (manifest.format !== STATIC_DB_FORMAT || manifest.version !== STATIC_DB_VERSION) {
+    throw new Error(
+      `Unsupported data manifest: expected format "${STATIC_DB_FORMAT}" version ${STATIC_DB_VERSION}.`
+    );
+  }
+  if (manifest.database !== STATIC_DB_NAME) {
+    throw new Error(`Invalid data manifest: database must be "${STATIC_DB_NAME}".`);
+  }
+  if (!Number.isSafeInteger(manifest.size) || manifest.size <= 0 || !SHA256_PATTERN.test(manifest.sha256)) {
+    throw new Error("Invalid data manifest: database size or SHA-256 is invalid.");
+  }
+  if (!Number.isSafeInteger(manifest.chunk_size) || manifest.chunk_size <= 0 || manifest.chunk_size > 24 * 1024 * 1024) {
+    throw new Error("Invalid data manifest: chunk_size must be between 1 byte and 24 MiB.");
+  }
+  if (!Array.isArray(manifest.parts) || !manifest.parts.length) {
+    throw new Error("Invalid data manifest: no database parts are listed.");
+  }
+  const seenPaths = new Set();
+  let listedSize = 0;
+  manifest.parts.forEach((part, index) => {
+    const path = part?.path;
+    const validPath = typeof path === "string" && path.length <= 512 && !path.startsWith("/") &&
+      !path.includes("\\") && !path.includes("?") && !path.includes("#") &&
+      path.split("/").every((segment) => segment && segment !== "." && segment !== "..");
+    if (!validPath || path !== `${STATIC_DB_NAME}.part${String(index).padStart(3, "0")}` || seenPaths.has(path)) {
+      throw new Error(`Invalid data manifest: part ${index + 1} has an unsafe or duplicate path.`);
+    }
+    if (!Number.isSafeInteger(part.size) || part.size <= 0 || part.size > manifest.chunk_size || !SHA256_PATTERN.test(part.sha256)) {
+      throw new Error(`Invalid data manifest: part ${index + 1} has an invalid size or SHA-256.`);
+    }
+    if (index < manifest.parts.length - 1 && part.size !== manifest.chunk_size) {
+      throw new Error(`Invalid data manifest: part ${index + 1} does not match chunk_size.`);
+    }
+    seenPaths.add(path);
+    listedSize += part.size;
+  });
+  if (!Number.isSafeInteger(listedSize) || listedSize !== manifest.size) {
+    throw new Error("Invalid data manifest: part sizes do not equal the complete database size.");
+  }
+  return manifest;
+}
+
+function byteProgress(downloaded, total, partNumber, partCount) {
+  const megabytes = (downloaded / (1024 * 1024)).toFixed(1);
+  const totalMegabytes = (total / (1024 * 1024)).toFixed(1);
+  setMessage(
+    elements.appStatus,
+    `Loading database part ${partNumber} of ${partCount}: ${megabytes} of ${totalMegabytes} MB...`
+  );
+}
+
+async function sha256Hex(bytes) {
+  if (!window.crypto?.subtle) {
+    throw new Error("This browser cannot verify database SHA-256 hashes. Use HTTPS or a current browser.");
+  }
+  const digest = await window.crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest), (value) => value.toString(16).padStart(2, "0")).join("");
+}
+
+async function readPart(response, part, progress) {
+  if (!response.body) {
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    progress(bytes.byteLength);
+    return bytes;
+  }
+  const reader = response.body.getReader();
+  const chunks = [];
+  let length = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    length += value.byteLength;
+    progress(value.byteLength);
+    if (length > part.size) throw new Error(`Database part "${part.path}" is larger than its manifest size.`);
+  }
+  const bytes = new Uint8Array(length);
+  let offset = 0;
+  chunks.forEach((chunk) => {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  });
+  return bytes;
+}
+
+async function fetchStaticDatabase(controller) {
+  let response;
+  try {
+    response = await fetch("/data/manifest.json", {
+      credentials: "same-origin",
+      headers: { Accept: "application/json" },
+      cache: "no-cache",
+      signal: controller.signal
+    });
+  } catch (error) {
+    if (error?.name === "AbortError") throw error;
+    throw new Error(`Could not fetch /data/manifest.json: ${errorMessage(error)}`);
+  }
+  if (response.status === 401) redirectToLogin(response, "/data/manifest.json");
+  if (response.redirected && !response.headers.get("Content-Type")?.includes("application/json")) {
+    redirectToLogin(response, "/data/manifest.json");
+  }
+  if (response.status === 404) return null;
+  if (!response.ok) throw new Error(`Could not fetch /data/manifest.json (HTTP ${response.status}).`);
+  let manifest;
+  try {
+    manifest = validateStaticManifest(await response.json());
+  } catch (error) {
+    if (error instanceof SyntaxError) throw new Error("Invalid data manifest: /data/manifest.json is not valid JSON.");
+    throw error;
+  }
+
+  const partBytes = [];
+  let downloaded = 0;
+  for (let index = 0; index < manifest.parts.length; index += 1) {
+    const part = manifest.parts[index];
+    const partUrl = `/data/${part.path.split("/").map(encodeURIComponent).join("/")}`;
+    byteProgress(downloaded, manifest.size, index + 1, manifest.parts.length);
+    let partResponse;
+    try {
+      partResponse = await fetch(partUrl, { credentials: "same-origin", cache: "no-cache", signal: controller.signal });
+    } catch (error) {
+      if (error?.name === "AbortError") throw error;
+      throw new Error(`Could not fetch database part "${part.path}": ${errorMessage(error)}`);
+    }
+    if (partResponse.status === 401) redirectToLogin(partResponse, partUrl);
+    if (!partResponse.ok) {
+      const detail = partResponse.status === 404 ? "is missing" : `returned HTTP ${partResponse.status}`;
+      throw new Error(`Database part "${part.path}" ${detail}. Re-upload the complete data directory.`);
+    }
+    const bytes = await readPart(partResponse, part, (amount) => {
+      downloaded += amount;
+      byteProgress(downloaded, manifest.size, index + 1, manifest.parts.length);
+    });
+    if (bytes.byteLength !== part.size) {
+      throw new Error(`Database part "${part.path}" has ${bytes.byteLength} bytes; expected ${part.size}.`);
+    }
+    const digest = await sha256Hex(bytes);
+    if (digest !== part.sha256) {
+      throw new Error(`SHA-256 mismatch for database part "${part.path}". Re-upload that part and reload.`);
+    }
+    partBytes.push(bytes);
+  }
+
+  const complete = new Uint8Array(manifest.size);
+  let offset = 0;
+  partBytes.forEach((bytes) => {
+    complete.set(bytes, offset);
+    offset += bytes.byteLength;
+  });
+  setMessage(elements.appStatus, "Verifying the complete database SHA-256...");
+  const completeDigest = await sha256Hex(complete);
+  if (completeDigest !== manifest.sha256) {
+    throw new Error("Complete database SHA-256 mismatch. Check the manifest and all uploaded parts.");
+  }
+  return new Blob([complete], { type: "application/vnd.sqlite3" });
+}
+
 async function initializeHttp() {
   const version = ++state.sourceVersion;
   const controller = new AbortController();
   state.startupController = controller;
-  setMessage(elements.appStatus, "Connecting to the local archive server...");
+  setMessage(elements.appStatus, "Looking for the static family archive...");
   try {
+    const databaseBlob = await fetchStaticDatabase(controller);
+    if (version !== state.sourceVersion) return;
+    if (databaseBlob) {
+      await activateStandalone(databaseBlob, "static", version, "Opening the verified database in this browser...");
+      return;
+    }
+    setMessage(elements.appStatus, "Static database not found; connecting to the local archive server...");
     const payload = await fetchJson("/api/datasets", controller);
     if (version !== state.sourceVersion) return;
     state.transport = "server";
     setSourceMode("server");
     await loadDatasets(payload);
     return;
-  } catch (serverError) {
-    if (serverError?.name === "AbortError" || version !== state.sourceVersion) return;
-    state.transport = "server";
-    setSourceMode("server");
+  } catch (startupError) {
+    if (startupError?.name === "AbortError" || version !== state.sourceVersion) return;
+    state.transport = null;
+    setSourceMode("");
     elements.dataset.replaceChildren(element("option", { text: "Collections unavailable" }));
-    setMessage(elements.appStatus, `Could not open collections: ${errorMessage(serverError)}`, "error");
+    setMessage(elements.appStatus, `Could not open the archive: ${errorMessage(startupError)}`, "error");
   }
 }
 
@@ -552,12 +849,10 @@ function initialize() {
   initializeHttp();
 }
 
-async function openPerson(summary) {
+async function loadPerson(summary, route) {
   const id = personId(summary);
-  if (!id) {
-    setMessage(elements.searchState, "This search result has no person identifier.", "error");
-    return;
-  }
+  if (!id || route.datasetId !== state.datasetId) return;
+  const routeVersion = ++state.routeVersion;
   state.recordController?.abort();
   state.treeController?.abort();
   state.recordController = new AbortController();
@@ -572,7 +867,8 @@ async function openPerson(summary) {
   elements.family.replaceChildren();
   elements.tree.replaceChildren();
   setMessage(elements.recordState, "Opening record...");
-  setMessage(elements.treeState, "Choose a direction and draw the tree.");
+  setMessage(elements.treeState, "Loading the pedigree navigator...");
+  loadTree();
 
   const base = `/api/people/${encodeURIComponent(state.datasetId)}/${encodeURIComponent(id)}`;
   const signal = state.recordController;
@@ -581,7 +877,7 @@ async function openPerson(summary) {
     api(`${base}/facts`, signal),
     api(`${base}/family`, signal)
   ]);
-  if (signal.signal.aborted) return;
+  if (signal.signal.aborted || routeVersion !== state.routeVersion) return;
 
   const [personRequest, factsRequest, familyRequest] = requests;
   if (personRequest.status === "fulfilled") {
@@ -825,141 +1121,247 @@ async function loadTree() {
   if (!state.currentPerson) return;
   state.treeController?.abort();
   state.treeController = new AbortController();
+  const controller = state.treeController;
   elements.tree.replaceChildren();
-  setMessage(elements.treeState, "Drawing family tree...");
-  const direction = new FormData(elements.treeForm).get("direction") || "ancestors";
-  const generations = elements.generations.value;
+  state.treeMap = null;
+  state.treeSurface = null;
+  setMessage(elements.treeState, "Loading family branches...");
+  const mode = String(new FormData(elements.treeForm).get("direction") || "both");
+  const generations = String(Math.max(1, Math.min(6, Number(elements.generations.value) || 3)));
   const id = personId(state.currentPerson);
   try {
-    const params = new URLSearchParams({ direction: String(direction), generations });
-    const path = `/api/people/${encodeURIComponent(state.datasetId)}/${encodeURIComponent(id)}/tree?${params}`;
-    const payload = await api(path, state.treeController);
-    renderTree(payload, String(direction));
-    setMessage(elements.treeState, "Select a branch to collapse or expand it.");
+    const directions = mode === "both" ? ["ancestors", "descendants"] : [mode];
+    const requests = await Promise.allSettled(directions.map((direction) => {
+      const params = new URLSearchParams({ direction, generations });
+      const path = `/api/people/${encodeURIComponent(state.datasetId)}/${encodeURIComponent(id)}/tree?${params}`;
+      return api(path, controller);
+    }));
+    if (controller.signal.aborted) return;
+    const graphs = requests.map((request, index) => request.status === "fulfilled"
+      ? linkedTreeGraph(request.value, directions[index])
+      : null).filter(Boolean);
+    if (!graphs.length) {
+      const failure = requests.find((request) => request.status === "rejected");
+      throw failure?.reason || new Error("No tree data was returned.");
+    }
+    renderPedigree(graphs, mode);
+    const failedCount = requests.filter((request) => request.status === "rejected").length;
+    setMessage(
+      elements.treeState,
+      failedCount
+        ? "One tree direction could not be loaded; the available branch is shown."
+        : "Select any card to focus that person. Scroll or drag the blank canvas to explore.",
+      failedCount ? "error" : ""
+    );
   } catch (error) {
     const message = errorMessage(error);
     if (message) setMessage(elements.treeState, `Tree could not be loaded: ${message}`, "error");
   }
 }
 
-function treeChildren(node, direction) {
-  if (!node || typeof node !== "object") return [];
-  const keys = direction === "ancestors"
-    ? ["parents", "ancestors", "children", "branches"]
-    : ["children", "descendants", "branches"];
-  return listFrom(node, keys);
-}
-
-function renderTree(payload, direction) {
-  if (payload?.root && Array.isArray(payload.people) && Array.isArray(payload.links)) {
-    renderLinkedTree(payload, direction);
-    return;
-  }
-  const directList = Array.isArray(payload) ? payload : null;
-  const nodes = directList || listFrom(payload, ["generations", "items"]);
-  if (nodes.length && nodes.every((node) => Array.isArray(node.people))) {
-    const flattened = nodes.flatMap((generation) => generation.people.map((person) => ({
-      ...person,
-      depth: generation.depth
-    })));
-    renderFlatTree([payload.root, ...flattened].filter(Boolean));
-    return;
-  }
-  if (nodes.length && nodes.some((node) => firstValue(node, ["generation", "depth", "level"]) !== undefined)) {
-    renderFlatTree(nodes);
-    return;
-  }
-
-  let root = payload?.root || payload?.tree || payload;
-  if (root?.person && !treeChildren(root, direction).length && treeChildren(root.person, direction).length) root = root.person;
-  if (!root || (typeof root === "object" && !Object.keys(root).length)) {
-    elements.tree.replaceChildren(element("p", { text: `No ${direction} are recorded.` }));
-    return;
-  }
-  const branch = renderTreeNode(root, direction, 0);
-  elements.tree.replaceChildren(branch);
-}
-
-function renderTreeNode(node, direction, depth) {
-  const person = node?.person || node?.individual || node;
-  const children = treeChildren(node, direction);
-  const personButton = element("button", { className: "tree-person", type: "button" }, [
-    document.createTextNode(personName(person)),
-    element("span", { text: lifeSummary(person) })
-  ]);
-  if (personId(person)) {
-    personButton.setAttribute("aria-label", `Open record for ${personName(person)}`);
-    personButton.addEventListener("click", () => openPerson(person));
-  }
-  else personButton.disabled = true;
-
-  if (!children.length) return element("div", { className: "tree-leaf" }, personButton);
-  const details = element("details");
-  details.open = depth < 2;
-  const summary = element("summary");
-  summary.append(element("span", { className: "tree-summary" }, [
-    document.createTextNode(personName(person)),
-    element("span", { text: lifeSummary(person) })
-  ]));
-  details.append(summary);
-  if (personId(person)) details.append(personButton);
-  children.forEach((child) => details.append(renderTreeNode(child, direction, depth + 1)));
-  return details;
-}
-
-function renderLinkedTree(payload, direction) {
-  const allPeople = [payload.root, ...payload.people];
-  const byId = new Map(allPeople.map((person) => [personId(person), person]));
-  const childrenById = new Map();
-  payload.links.forEach((link) => {
+function linkedTreeGraph(payload, direction) {
+  const root = payload?.root || payload?.person;
+  if (!root || !personId(root)) return null;
+  const people = [root, ...listFrom(payload, ["people", "items"])]
+    .filter((person) => person && personId(person));
+  const byId = new Map(people.map((person) => [personId(person), person]));
+  const levels = new Map();
+  people.forEach((person) => {
+    const depth = Number(firstValue(person, ["depth", "generation", "level"]) || 0);
+    if (depth <= 0 || !Number.isFinite(depth)) return;
+    if (!levels.has(depth)) levels.set(depth, new Map());
+    levels.get(depth).set(personId(person), person);
+  });
+  listFrom(payload, ["generations"]).forEach((generation) => {
+    const depth = Number(generation?.depth || 0);
+    if (depth <= 0) return;
+    if (!levels.has(depth)) levels.set(depth, new Map());
+    listFrom(generation, ["people", "items"]).forEach((person) => {
+      if (personId(person)) {
+        byId.set(personId(person), person);
+        levels.get(depth).set(personId(person), person);
+      }
+    });
+  });
+  const links = listFrom(payload, ["links", "edges"]).filter((link) => {
     const from = String(firstValue(link, ["from_person_id", "from", "source_id"]) ?? "");
     const to = String(firstValue(link, ["to_person_id", "to", "target_id"]) ?? "");
-    if (!from || !to || !byId.has(to)) return;
-    if (!childrenById.has(from)) childrenById.set(from, []);
-    const person = { ...byId.get(to) };
-    if (!person.relationship && link.relationship) person.relationship = link.relationship;
-    childrenById.get(from).push(person);
+    return from && to && byId.has(from) && byId.has(to) && from !== to;
   });
+  return { direction, root, byId, levels, links };
+}
 
-  function branch(person, seen = new Set()) {
-    const id = personId(person);
-    if (seen.has(id)) return person;
-    const nextSeen = new Set(seen);
-    nextSeen.add(id);
-    const children = (childrenById.get(id) || []).map((child) => branch(child, nextSeen));
-    return { person, [direction]: children };
+function generationLabel(direction, depth) {
+  const position = direction === "ancestors" ? "above" : "below";
+  return `Generation ${depth} ${position}`;
+}
+
+function pedigreeCard(person, context, focused = false) {
+  const id = personId(person);
+  const button = element("button", {
+    className: `pedigree-card${focused ? " is-focused" : ""}`,
+    type: "button"
+  }, [
+    element("span", { className: "pedigree-context", text: context }),
+    element("strong", { text: personName(person) }),
+    element("span", { className: "pedigree-lifespan", text: lifeSummary(person) })
+  ]);
+  button.setAttribute("aria-label", `${personName(person)}, ${lifeSummary(person)}. ${context}. Focus this person.`);
+  button.addEventListener("click", () => openPerson(person));
+  return button;
+}
+
+function renderPedigree(graphs, mode) {
+  const root = graphs[0].root;
+  const rootId = personId(root);
+  const ancestorGraph = graphs.find((graph) => graph.direction === "ancestors");
+  const descendantGraph = graphs.find((graph) => graph.direction === "descendants");
+  const maxPeople = Math.max(1, ...graphs.flatMap((graph) =>
+    [...graph.levels.values()].map((people) => people.size)));
+  const surface = element("div", { className: "pedigree-surface" });
+  const map = element("div", { className: "pedigree-map" });
+  map.style.width = `${Math.max(760, maxPeople * 210)}px`;
+  const lines = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  lines.setAttribute("class", "pedigree-lines");
+  lines.setAttribute("aria-hidden", "true");
+  map.append(lines);
+  const cards = new Map();
+
+  function addLevels(graph, depths) {
+    depths.forEach((depth) => {
+      const lane = element("section", { className: `pedigree-lane ${graph.direction}` });
+      lane.setAttribute("aria-label", generationLabel(graph.direction, depth));
+      for (const person of graph.levels.get(depth).values()) {
+        const relation = displayValue(firstValue(person, ["relationship", "relation"]));
+        const context = relation ? `${relation} · ${generationLabel(graph.direction, depth)}` : generationLabel(graph.direction, depth);
+        const card = pedigreeCard(person, context);
+        cards.set(`${graph.direction}\u0000${personId(person)}`, card);
+        lane.append(card);
+      }
+      map.append(lane);
+    });
   }
 
-  const rootBranch = branch(payload.root);
-  const rootNode = renderTreeNode(rootBranch, direction, 0);
-  if (!treeChildren(rootBranch, direction).length) {
-    elements.tree.replaceChildren(
-      element("p", { text: `No ${direction} are recorded for this person.` }),
-      rootNode
-    );
-  } else {
-    elements.tree.replaceChildren(rootNode);
+  if (ancestorGraph) addLevels(ancestorGraph, [...ancestorGraph.levels.keys()].sort((a, b) => b - a));
+  const rootLane = element("section", { className: "pedigree-lane root" });
+  const rootCard = pedigreeCard(root, "Focused person", true);
+  cards.set(`root\u0000${rootId}`, rootCard);
+  rootLane.append(rootCard);
+  map.append(rootLane);
+  if (descendantGraph) addLevels(descendantGraph, [...descendantGraph.levels.keys()].sort((a, b) => a - b));
+
+  if ((!ancestorGraph || !ancestorGraph.levels.size) && (!descendantGraph || !descendantGraph.levels.size)) {
+    rootLane.append(element("p", { className: "pedigree-empty", text: `No ${mode === "both" ? "ancestors or descendants" : mode} are recorded.` }));
+  }
+  surface.append(map);
+  elements.tree.replaceChildren(surface);
+  state.treeMap = map;
+  state.treeSurface = surface;
+  state.treeCards = cards;
+  state.treeGraphs = graphs;
+  state.treeRootId = rootId;
+  state.treeScale = 1;
+  updateTreeZoom(false);
+  window.requestAnimationFrame(() => {
+    drawTreeConnectors();
+    centerTree();
+  });
+}
+
+function treeCard(direction, id) {
+  if (id === state.treeRootId) return state.treeCards?.get(`root\u0000${id}`);
+  return state.treeCards?.get(`${direction}\u0000${id}`);
+}
+
+function drawTreeConnectors() {
+  const map = state.treeMap;
+  if (!map) return;
+  const svg = map.querySelector(".pedigree-lines");
+  svg.replaceChildren();
+  svg.setAttribute("viewBox", `0 0 ${map.offsetWidth} ${map.offsetHeight}`);
+  svg.setAttribute("width", String(map.offsetWidth));
+  svg.setAttribute("height", String(map.offsetHeight));
+  const drawn = new Set();
+  function mapPosition(card) {
+    let x = 0;
+    let y = 0;
+    let current = card;
+    while (current && current !== map) {
+      x += current.offsetLeft;
+      y += current.offsetTop;
+      current = current.offsetParent;
+    }
+    return { x, y };
+  }
+  state.treeGraphs.forEach((graph) => {
+    graph.links.forEach((link) => {
+      const fromId = String(firstValue(link, ["from_person_id", "from", "source_id"]) ?? "");
+      const toId = String(firstValue(link, ["to_person_id", "to", "target_id"]) ?? "");
+      const from = treeCard(graph.direction, fromId);
+      const to = treeCard(graph.direction, toId);
+      const marker = `${graph.direction}\u0000${fromId}\u0000${toId}`;
+      if (!from || !to || drawn.has(marker)) return;
+      drawn.add(marker);
+      const upper = graph.direction === "ancestors" ? to : from;
+      const lower = graph.direction === "ancestors" ? from : to;
+      const upperPosition = mapPosition(upper);
+      const lowerPosition = mapPosition(lower);
+      const startX = upperPosition.x + upper.offsetWidth / 2;
+      const startY = upperPosition.y + upper.offsetHeight;
+      const endX = lowerPosition.x + lower.offsetWidth / 2;
+      const endY = lowerPosition.y;
+      const middleY = (startY + endY) / 2;
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.setAttribute("d", `M ${startX} ${startY} V ${middleY} H ${endX} V ${endY}`);
+      svg.append(path);
+    });
+  });
+}
+
+function updateTreeZoom(keepCenter = true) {
+  if (!state.treeMap || !state.treeSurface) return;
+  const viewport = elements.tree;
+  const oldWidth = state.treeSurface.offsetWidth || 1;
+  const oldHeight = state.treeSurface.offsetHeight || 1;
+  const centerX = (viewport.scrollLeft + viewport.clientWidth / 2) / oldWidth;
+  const centerY = (viewport.scrollTop + viewport.clientHeight / 2) / oldHeight;
+  state.treeMap.style.transform = `scale(${state.treeScale})`;
+  state.treeSurface.style.width = `${state.treeMap.offsetWidth * state.treeScale}px`;
+  state.treeSurface.style.height = `${state.treeMap.offsetHeight * state.treeScale}px`;
+  elements.treeZoomLevel.value = `${Math.round(state.treeScale * 100)}%`;
+  elements.treeZoomLevel.textContent = `${Math.round(state.treeScale * 100)}%`;
+  elements.treeZoomOut.disabled = state.treeScale <= 0.6;
+  elements.treeZoomIn.disabled = state.treeScale >= 1.6;
+  if (keepCenter) {
+    viewport.scrollLeft = centerX * state.treeSurface.offsetWidth - viewport.clientWidth / 2;
+    viewport.scrollTop = centerY * state.treeSurface.offsetHeight - viewport.clientHeight / 2;
   }
 }
 
-function renderFlatTree(nodes) {
-  const groups = new Map();
-  nodes.forEach((node) => {
-    const depth = Number(firstValue(node, ["generation", "depth", "level"]) || 0);
-    if (!groups.has(depth)) groups.set(depth, []);
-    groups.get(depth).push(node.person || node.individual || node);
-  });
-  const sections = [...groups.entries()].sort((a, b) => a[0] - b[0]).map(([depth, people]) => {
-    const list = element("ul");
-    people.forEach((person) => {
-      const button = element("button", { className: "family-person", type: "button", text: personName(person) });
-      if (personId(person)) button.addEventListener("click", () => openPerson(person));
-      else button.disabled = true;
-      list.append(element("li", {}, button));
-    });
-    return element("section", { className: "generation-list" }, [element("h4", { text: depth === 0 ? "Starting person" : `Generation ${depth}` }), list]);
-  });
-  elements.tree.replaceChildren(...sections);
+function changeTreeZoom(amount) {
+  state.treeScale = Math.max(0.6, Math.min(1.6, Math.round((state.treeScale + amount) * 10) / 10));
+  updateTreeZoom();
+}
+
+function centerTree() {
+  const root = treeCard("root", state.treeRootId);
+  if (!root || !state.treeSurface) return;
+  let x = 0;
+  let y = 0;
+  let current = root;
+  while (current && current !== state.treeMap) {
+    x += current.offsetLeft;
+    y += current.offsetTop;
+    current = current.offsetParent;
+  }
+  elements.tree.scrollLeft = (x + root.offsetWidth / 2) * state.treeScale - elements.tree.clientWidth / 2;
+  elements.tree.scrollTop = (y + root.offsetHeight / 2) * state.treeScale - elements.tree.clientHeight / 2;
+}
+
+function resetTreeView() {
+  state.treeScale = 1;
+  updateTreeZoom(false);
+  centerTree();
 }
 
 elements.databaseFile.addEventListener("change", async () => {
@@ -968,6 +1370,7 @@ elements.databaseFile.addEventListener("change", async () => {
   elements.databaseFile.value = "";
 });
 elements.dataset.addEventListener("change", () => {
+  writeRoute({ kind: "root" });
   resetForDataset();
   loadBrowsePage(0);
 });
@@ -1008,5 +1411,49 @@ elements.treeForm.addEventListener("submit", (event) => {
   event.preventDefault();
   loadTree();
 });
+elements.treeZoomOut.addEventListener("click", () => changeTreeZoom(-0.1));
+elements.treeZoomIn.addEventListener("click", () => changeTreeZoom(0.1));
+elements.treeZoomReset.addEventListener("click", resetTreeView);
+
+let pan = null;
+elements.tree.addEventListener("pointerdown", (event) => {
+  if (event.button !== 0 || event.target.closest("button")) return;
+  pan = {
+    pointerId: event.pointerId,
+    x: event.clientX,
+    y: event.clientY,
+    left: elements.tree.scrollLeft,
+    top: elements.tree.scrollTop
+  };
+  elements.tree.setPointerCapture(event.pointerId);
+  elements.tree.classList.add("is-panning");
+});
+elements.tree.addEventListener("pointermove", (event) => {
+  if (!pan || pan.pointerId !== event.pointerId) return;
+  elements.tree.scrollLeft = pan.left - (event.clientX - pan.x);
+  elements.tree.scrollTop = pan.top - (event.clientY - pan.y);
+});
+function endTreePan(event) {
+  if (!pan || pan.pointerId !== event.pointerId) return;
+  pan = null;
+  elements.tree.classList.remove("is-panning");
+}
+elements.tree.addEventListener("pointerup", endTreePan);
+elements.tree.addEventListener("pointercancel", endTreePan);
+
+let routeSyncQueued = false;
+function queueRouteSync() {
+  if (routeSyncQueued) return;
+  routeSyncQueued = true;
+  window.setTimeout(() => {
+    routeSyncQueued = false;
+    applyRoute();
+  }, 0);
+}
+window.addEventListener("popstate", queueRouteSync);
+window.addEventListener("hashchange", queueRouteSync);
+window.addEventListener("resize", () => window.requestAnimationFrame(drawTreeConnectors));
+
+if (window.matchMedia("(max-width: 560px)").matches) elements.generations.value = "2";
 
 initialize();

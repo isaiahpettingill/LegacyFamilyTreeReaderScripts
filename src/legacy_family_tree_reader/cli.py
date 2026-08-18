@@ -28,6 +28,7 @@ from .queries import (
 )
 from .schema import LEGACY_SCHEMA_VERSION, SCHEMA_VERSION, TABLES
 from .server import serve
+from .site import MIB, build_static_site
 
 
 def _identifier(value: str) -> int | str:
@@ -99,6 +100,15 @@ def _build_parser() -> argparse.ArgumentParser:
     browse_parser.add_argument("--port", type=int, default=8765)
     browse_parser.add_argument("--no-browser", action="store_true")
     browse_parser.set_defaults(handler=_cmd_browse)
+
+    site_parser = subparsers.add_parser(
+        "build-site", help="build a static browser with a chunked database"
+    )
+    site_parser.add_argument("database", metavar="DB")
+    site_parser.add_argument("output", metavar="OUTPUT")
+    site_parser.add_argument("--chunk-size", type=int, default=8, metavar="MIB")
+    site_parser.add_argument("--force", action="store_true")
+    site_parser.set_defaults(handler=_cmd_build_site)
 
     search_parser = subparsers.add_parser("search", help="search people by name")
     search_parser.add_argument("database", metavar="DB")
@@ -252,6 +262,17 @@ def _cmd_browse(arguments: argparse.Namespace) -> int:
         port=arguments.port,
         open_browser=not arguments.no_browser,
     )
+    return 0
+
+
+def _cmd_build_site(arguments: argparse.Namespace) -> int:
+    result = build_static_site(
+        arguments.database,
+        arguments.output,
+        chunk_size=arguments.chunk_size * MIB,
+        force=arguments.force,
+    )
+    _json(result)
     return 0
 
 

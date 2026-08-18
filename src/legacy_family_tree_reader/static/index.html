@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
   <title>Legacy Family Archive</title>
+  <script>document.write('<base href="' + (location.protocol === 'file:' ? new URL('.', location.href).href : '/') + '">');</script>
   <link rel="stylesheet" href="styles.css">
   <script src="vendor/sql-asm.js" defer></script>
   <script src="standalone.js" defer></script>
@@ -116,8 +117,9 @@
           </div>
           <form id="tree-form" class="tree-controls">
             <fieldset>
-              <legend>Direction</legend>
-              <label><input type="radio" name="direction" value="ancestors" checked> Ancestors</label>
+              <legend>View</legend>
+              <label><input type="radio" name="direction" value="both" checked> Both</label>
+              <label><input type="radio" name="direction" value="ancestors"> Ancestors</label>
               <label><input type="radio" name="direction" value="descendants"> Descendants</label>
             </fieldset>
             <label for="generations-select">Generations
@@ -129,10 +131,16 @@
                 <option value="6">6</option>
               </select>
             </label>
-            <button type="submit">Draw tree</button>
+            <button type="submit">Update tree</button>
+            <div class="zoom-controls" role="group" aria-label="Tree zoom">
+              <button id="tree-zoom-out" class="mini-button" type="button" aria-label="Zoom out">&minus;</button>
+              <output id="tree-zoom-level" aria-live="polite">100%</output>
+              <button id="tree-zoom-in" class="mini-button" type="button" aria-label="Zoom in">+</button>
+              <button id="tree-zoom-reset" class="mini-button" type="button">Reset view</button>
+            </div>
           </form>
           <div id="tree-state" class="inline-state" role="status" aria-live="polite"></div>
-          <div id="tree-content" class="tree-content"></div>
+          <div id="tree-content" class="tree-content" tabindex="0" aria-label="Interactive family tree. Scroll to explore, or drag the blank canvas to pan."></div>
         </section>
       </div>
     </article>

@@ -264,7 +264,7 @@ select:disabled {
 }
 
 .search-row button,
-.tree-controls button,
+.tree-controls > button,
 .primary-button {
   padding: .7rem 1rem;
   border: 1px solid var(--red-dark);
@@ -278,7 +278,7 @@ select:disabled {
 }
 
 .search-row button:hover,
-.tree-controls button:hover,
+.tree-controls > button:hover,
 .primary-button:hover:not(:disabled) {
   background: var(--red-dark);
 }
@@ -630,64 +630,179 @@ footer {
   padding: .35rem;
 }
 
-.tree-content {
-  overflow-x: auto;
+.zoom-controls {
+  display: flex;
+  align-items: center;
+  gap: .35rem;
+  margin-left: auto;
+  font-family: Arial, sans-serif;
 }
 
-.tree-content details,
-.tree-leaf {
-  position: relative;
-  margin: .55rem 0 .55rem 1rem;
-  padding-left: 1.15rem;
-  border-left: 1px solid var(--rule);
-}
-
-.tree-content > details,
-.tree-content > .tree-leaf {
-  margin-left: 0;
-}
-
-.tree-content summary {
-  width: max-content;
-  min-width: 13rem;
-  padding: .45rem .65rem;
-  color: var(--ink);
-  background: #f4ecdc;
-  cursor: pointer;
-}
-
-.tree-summary {
-  display: inline-block;
-}
-
-.tree-summary > span {
-  display: block;
+.zoom-controls output {
+  min-width: 3.25rem;
   color: var(--ink-soft);
-  font-size: .78rem;
+  font-size: .72rem;
+  text-align: center;
+}
+
+.zoom-controls .mini-button {
+  min-width: 2rem;
+  min-height: 2rem;
+  padding: .25rem .5rem;
+  background: var(--white);
+}
+
+.tree-content {
+  position: relative;
+  min-height: 30rem;
+  max-height: 70vh;
+  overflow: auto;
+  border: 1px solid var(--rule);
+  background:
+    linear-gradient(rgb(184 169 138 / 18%) 1px, transparent 1px),
+    linear-gradient(90deg, rgb(184 169 138 / 18%) 1px, transparent 1px),
+    #f8f3e8;
+  background-size: 2rem 2rem;
+  cursor: grab;
+  overscroll-behavior: contain;
+  touch-action: pan-x pan-y;
+}
+
+.tree-content.is-panning {
+  cursor: grabbing;
+  user-select: none;
+}
+
+.pedigree-surface {
+  min-width: 100%;
+  min-height: 100%;
+}
+
+.pedigree-map {
+  position: relative;
+  display: flex;
+  min-height: 100%;
+  flex-direction: column;
+  justify-content: center;
+  padding: 3rem 2rem;
+  transform-origin: 0 0;
+}
+
+.pedigree-lines {
+  position: absolute;
+  z-index: 0;
+  inset: 0;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.pedigree-lines path {
+  fill: none;
+  stroke: #8e8269;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+}
+
+.pedigree-lane {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  min-height: 8.75rem;
+  align-items: center;
+  justify-content: space-around;
+  gap: 2rem;
+  padding: 1rem;
+}
+
+.pedigree-lane.root {
+  min-height: 10rem;
+}
+
+.pedigree-card {
+  position: relative;
+  width: 11.5rem;
+  min-height: 6.2rem;
+  flex: 0 0 11.5rem;
+  padding: .7rem .8rem .8rem;
+  color: var(--ink);
+  border: 1px solid #a99a7d;
+  border-top: 4px solid var(--green);
+  background: var(--white);
+  box-shadow: 0 5px 13px rgb(50 39 24 / 12%);
+  text-align: left;
+}
+
+.pedigree-lane.descendants .pedigree-card {
+  border-top-color: var(--red);
+}
+
+.pedigree-card:hover {
+  border-color: var(--red);
+  background: #fffaf0;
+  transform: translateY(-2px);
+}
+
+.pedigree-card.is-focused {
+  width: 13rem;
+  min-height: 7rem;
+  flex-basis: 13rem;
+  color: var(--white);
+  border: 2px solid var(--red-dark);
+  border-top: 5px solid var(--red);
+  background: var(--green);
+  box-shadow: 0 8px 22px rgb(36 36 31 / 24%);
+}
+
+.pedigree-card strong,
+.pedigree-card span {
+  display: block;
+}
+
+.pedigree-card strong {
+  margin-top: .3rem;
+  font-size: .95rem;
+  font-weight: 400;
+  line-height: 1.25;
+}
+
+.pedigree-context {
+  overflow: hidden;
+  color: var(--red);
+  font-family: Arial, sans-serif;
+  font-size: .58rem;
+  font-weight: 700;
+  letter-spacing: .06em;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.pedigree-card.is-focused .pedigree-context {
+  color: #e7cdb4;
+}
+
+.pedigree-lifespan {
+  margin-top: .35rem;
+  color: var(--ink-soft);
+  font-size: .72rem;
   font-style: italic;
 }
 
-.tree-content details > .tree-person {
-  margin: .35rem 0 0 1.15rem;
-  color: var(--red);
-  font-family: Arial, sans-serif;
-  font-size: .7rem;
+.pedigree-card.is-focused .pedigree-lifespan {
+  color: #eee4d1;
 }
 
-.tree-content details > .tree-person::before {
-  content: "Open record: ";
-}
-
-.tree-leaf .tree-person {
-  min-width: 13rem;
-  padding: .45rem .65rem;
-  border: 1px solid var(--paper-deep);
-}
-
-.generation-list h4 {
-  margin-bottom: .3rem;
-  color: var(--red);
-  font-weight: 400;
+.pedigree-empty {
+  position: absolute;
+  top: calc(50% + 4.5rem);
+  width: 24rem;
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: .82rem;
+  font-style: italic;
+  text-align: center;
 }
 
 .relationship-ledger {
@@ -863,6 +978,33 @@ footer p {
   .relationship-ledger {
     gap: 1.5rem;
   }
+
+  .tree-content {
+    min-height: 25rem;
+    max-height: 65vh;
+  }
+
+  .pedigree-map {
+    padding: 2rem 1rem;
+  }
+
+  .pedigree-lane {
+    min-height: 7.5rem;
+    gap: 1rem;
+  }
+
+  .pedigree-card {
+    width: 9.5rem;
+    min-height: 5.5rem;
+    flex-basis: 9.5rem;
+    padding: .55rem .65rem;
+  }
+
+  .pedigree-card.is-focused {
+    width: 10.5rem;
+    min-height: 6rem;
+    flex-basis: 10.5rem;
+  }
 }
 
 @media (max-width: 560px) {
@@ -910,6 +1052,19 @@ footer p {
   .tree-controls > label,
   .tree-controls button {
     width: 100%;
+  }
+
+  .tree-controls fieldset {
+    flex-wrap: wrap;
+  }
+
+  .zoom-controls {
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .zoom-controls .mini-button {
+    width: auto;
   }
 }
 

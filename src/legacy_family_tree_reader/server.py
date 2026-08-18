@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import mimetypes
 import re
+import shutil
 import sqlite3
 import threading
 import webbrowser
@@ -26,6 +27,7 @@ from .queries import (
     search_people,
     shortest_relationship_path,
 )
+from .site import ensure_chunk_cache
 
 _PERSON_ROUTE = re.compile(r"^/api/people/([^/]+)/([^/]+)(?:/(family|facts|tree))?$")
 
@@ -45,14 +47,27 @@ def _first(parameters: dict[str, list[str]], *names: str) -> str | None:
     return None
 
 
-def _handler(database_path: Path, static_root: Path) -> type[BaseHTTPRequestHandler]:
+def _handler(
+    database_path: Path, static_root: Path, data_root: Path | None = None
+) -> type[BaseHTTPRequestHandler]:
+    static_root = static_root.resolve()
+    data_root = data_root.resolve() if data_root is not None else None
+
     class RequestHandler(BaseHTTPRequestHandler):
-        server_version = "LegacyFamilyTreeReader/0.2"
+        server_version = "LegacyFamilyTreeReader/0.3"
 
         def do_GET(self) -> None:
+            self._dispatch()
+
+        def do_HEAD(self) -> None:
+            self._dispatch()
+
+        def _dispatch(self) -> None:
             parsed = urlsplit(self.path)
             if parsed.path.startswith("/api/"):
                 self._serve_api(parsed.path, parse_qs(parsed.query, keep_blank_values=True))
+            elif parsed.path.startswith("/data/") and data_root is not None:
+                self._serve_data(parsed.path)
             else:
                 self._serve_static(parsed.path)
 
@@ -165,8 +180,13 @@ def _handler(database_path: Path, static_root: Path) -> type[BaseHTTPRequestHand
             try:
                 decoded = unquote(request_path)
                 relative = PurePosixPath(decoded.lstrip("/"))
-                if any(part in {"", ".", ".."} for part in relative.parts):
+                if (
+                    "\x00" in decoded
+                    or "\\" in decoded
+                    or any(part in {"", ".", ".."} for part in relative.parts)
+                ):
                     raise ValueError
+                spa_fallback = bool(relative.parts) and not relative.suffix
                 if decoded.endswith("/") or not relative.parts:
                     relative = relative / "index.html"
                 candidate = static_root.joinpath(*relative.parts).resolve()
@@ -174,21 +194,64 @@ def _handler(database_path: Path, static_root: Path) -> type[BaseHTTPRequestHand
             except (OSError, ValueError):
                 self.send_error(HTTPStatus.NOT_FOUND)
                 return
+            if not candidate.is_file() and spa_fallback:
+                try:
+                    candidate = (static_root / "index.html").resolve()
+                    candidate.relative_to(static_root)
+                except (OSError, ValueError):
+                    self.send_error(HTTPStatus.NOT_FOUND)
+                    return
             if not candidate.is_file():
                 self.send_error(HTTPStatus.NOT_FOUND)
                 return
+            content_type = mimetypes.guess_type(candidate.name)[0] or "application/octet-stream"
+            self._send_file(candidate, content_type)
+
+        def _serve_data(self, request_path: str) -> None:
+            assert data_root is not None
             try:
-                content = candidate.read_bytes()
+                decoded = unquote(request_path)
+                relative = PurePosixPath(decoded.lstrip("/"))
+                if len(relative.parts) != 2 or relative.parts[0] != "data":
+                    raise ValueError
+                name = relative.parts[1]
+                if name == "manifest.json":
+                    content_type = "application/json"
+                    cache_control = "no-store"
+                elif re.fullmatch(r"family-tree\.sqlite\.part\d{3,}", name):
+                    content_type = "application/octet-stream"
+                    cache_control = "public, max-age=31536000, immutable"
+                else:
+                    raise ValueError
+                candidate = (data_root / name).resolve()
+                candidate.relative_to(data_root)
+            except (OSError, ValueError):
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+            if not candidate.is_file():
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+            self._send_file(candidate, content_type, cache_control)
+
+        def _send_file(
+            self, candidate: Path, content_type: str, cache_control: str | None = None
+        ) -> None:
+            try:
+                size = candidate.stat().st_size
+                source = candidate.open("rb")
             except OSError:
                 self.send_error(HTTPStatus.NOT_FOUND)
                 return
-            content_type = mimetypes.guess_type(candidate.name)[0] or "application/octet-stream"
-            self.send_response(HTTPStatus.OK)
-            self.send_header("Content-Type", content_type)
-            self.send_header("Content-Length", str(len(content)))
-            self.send_header("X-Content-Type-Options", "nosniff")
-            self.end_headers()
-            self.wfile.write(content)
+            with source:
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(size))
+                if cache_control is not None:
+                    self.send_header("Cache-Control", cache_control)
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.end_headers()
+                if self.command != "HEAD":
+                    shutil.copyfileobj(source, self.wfile, length=1024 * 1024)
 
         def _bad_request(self, message: str) -> None:
             self._send_json({"error": message}, HTTPStatus.BAD_REQUEST)
@@ -201,7 +264,8 @@ def _handler(database_path: Path, static_root: Path) -> type[BaseHTTPRequestHand
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
             self.end_headers()
-            self.wfile.write(content)
+            if self.command != "HEAD":
+                self.wfile.write(content)
 
     return RequestHandler
 
@@ -218,7 +282,8 @@ def serve(
     connection = connect_read_only(path)
     connection.close()
     static_root = Path(__file__).with_name("static").resolve()
-    httpd = ThreadingHTTPServer((host, port), _handler(path, static_root))
+    data_root = ensure_chunk_cache(path)
+    httpd = ThreadingHTTPServer((host, port), _handler(path, static_root, data_root))
     bound_port = httpd.server_address[1]
     browser_host = host if host not in {"", "0.0.0.0", "::"} else "127.0.0.1"
     if ":" in browser_host and not browser_host.startswith("["):

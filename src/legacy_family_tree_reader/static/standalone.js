@@ -763,6 +763,11 @@
     return url;
   }
 
+  function personResult(result) {
+    if (result === null) throw new Error("Person not found");
+    return result;
+  }
+
   async function request(path) {
     if (!database) throw new Error("No database is open");
     const url = parseRequest(path);
@@ -788,14 +793,14 @@
     }
     const datasetId = parseIdentifier(datasetText, "dataset_id");
     const personId = parseIdentifier(personText, "person_id");
-    if (match[3] === "facts") return getPersonFacts(datasetId, personId);
-    if (match[3] === "family") return getFamily(datasetId, personId);
+    if (match[3] === "facts") return personResult(getPersonFacts(datasetId, personId));
+    if (match[3] === "family") return personResult(getFamily(datasetId, personId));
     if (match[3] === "tree") {
       const direction = firstParameter(url.searchParams, "direction") || "ancestors";
       const generations = bounded(firstParameter(url.searchParams, "generations"), "generations", 4, 0, 10);
-      return getTree(datasetId, personId, direction, generations);
+      return personResult(getTree(datasetId, personId, direction, generations));
     }
-    return getPerson(datasetId, personId);
+    return personResult(getPerson(datasetId, personId));
   }
 
   function validateSchema(candidate) {

@@ -1,6 +1,6 @@
 [project]
 name = "legacy-family-tree-reader"
-version = "0.2.2"
+version = "0.3.0"
 description = "Convert, merge, browse, query, and export Legacy Family Tree 9 databases"
 readme = "README.md"
 requires-python = ">=3.11"

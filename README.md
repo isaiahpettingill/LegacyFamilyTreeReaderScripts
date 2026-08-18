@@ -162,15 +162,50 @@ The people index opens immediately without requiring a search. It retrieves 100
 alphabetically sorted people at a time and provides Previous/Next controls, so
 large trees do not create tens of thousands of browser elements. Name search
 remains available and includes alternate names, while exact and partial primary
-given-name/surname matches rank ahead of alternate-name matches.
+given-name/surname matches rank ahead of alternate-name matches. Person pages
+have persistent `/dataset/DATASET/person/PERSON` routes and an interactive
+ancestor or descendant pedigree with generation, zoom, pan, and recenter
+controls.
 
 The static browser can also open a descriptive SQLite database directly,
 without running the Python server. Open
 `src/legacy_family_tree_reader/static/index.html` in a browser, choose **Open
 SQLite file**, and select the generated database. The bundled SQL.js reader
 loads it read-only into browser memory; it does not upload the file or use an
-API. The Python server mode is preferable for very large databases because
-direct mode holds the complete SQLite file in memory.
+API. Local server and hosted static modes download verified database chunks and
+also reconstruct the complete SQLite file in browser memory, so the browser
+must have enough memory for the uncompressed database.
+
+### Build a self-hosted site
+
+`build-site` turns any descriptive SQLite database produced by this project
+into a complete static site:
+
+```console
+legacy-family-tree build-site genealogy.sqlite family-site
+```
+
+The build automatically streams the database into deterministic 8 MiB chunks,
+writes a size and SHA-256 manifest, and copies the browser runtime. Use
+`--chunk-size MIB` to choose a size from 1 through 24 MiB, or `--force` to
+replace an existing build:
+
+```console
+legacy-family-tree build-site genealogy.sqlite family-site \
+  --chunk-size 8 --force
+```
+
+Serve or upload the complete `family-site` directory without changing its
+layout. Configure the host to fall back to `index.html` for extensionless URLs
+so persistent person routes work when opened or refreshed. The database remains
+client-side: visitors download every chunk, verify it, and query it locally
+with the bundled SQL.js runtime. Chunking avoids common per-file hosting limits;
+it is not encryption and does not prevent an authorized visitor from retaining
+the database.
+
+For a password-gated Cloudflare Workers deployment, including secret setup,
+updates, and the security model, see
+[cloudflare/README.md](cloudflare/README.md).
 
 If the page reports that it cannot connect, either choose a SQLite file in
 direct mode or make sure the `legacy-family-tree browse ...` process is still
@@ -217,6 +252,7 @@ See [docs/SCHEMA.md](docs/SCHEMA.md#dates) for details.
 | `merge OUTPUT SOURCE...` | Import multiple isolated datasets into one descriptive SQLite database. |
 | `mdb2sqlite OUTPUT SOURCE...` | Append Access sources into a raw `tbl*` compatibility database. |
 | `browse DB` | Run the local read-only browser. |
+| `build-site DB OUTPUT` | Build a static browser and automatically chunk its descriptive SQLite database. |
 | `search DB DATASET QUERY` | Search primary and alternate person names. |
 | `person DB DATASET PERSON_ID` | Show identity and basic person fields. |
 | `family DB DATASET PERSON_ID` | Show immediate family. |
@@ -246,10 +282,12 @@ equivalent.
   family, tree, and relationship JSON queries.
 - `identity.py` stores explicit identity groups separately from source records
   and computes conservative suggestions.
-- `server.py` exposes the read-only query layer and packaged browser assets over
-  a local HTTP server.
+- `site.py` builds deterministic chunked archives and maintains the local
+  browser's hash-addressed database chunk cache.
+- `server.py` exposes the read-only query layer, packaged browser assets, and
+  chunk cache over a local HTTP server.
 - `static/standalone.js` uses the bundled SQL.js runtime for a direct,
-  API-free local-file mode.
+  API-free local-file or chunked-host mode.
 - `exporters.py` produces GEDCOM 5.5.1 and query-friendly Excel workbooks.
 - `build_tools.py` and `scripts/build-mdbtools-llvm.sh` provide the LLVM
   `mdbtools` build path.
