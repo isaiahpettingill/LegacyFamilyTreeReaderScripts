@@ -189,8 +189,8 @@ legacy-family-tree browse genealogy.sqlite --host 0.0.0.0 --port 8000 --no-brows
 
 Put an HTTPS reverse proxy in front of port 8000; never expose the unencrypted
 Uvicorn port directly to the internet. A production Docker Compose deployment
-with Caddy, automatic HTTPS, a read-only database mount, health checks, and
-update instructions is provided in [deploy/vps/README.md](deploy/vps/README.md).
+with Cloudflare Tunnel, a read-only database mount, health checks, and update
+instructions is provided in [deploy/vps/README.md](deploy/vps/README.md).
 
 If the page reports that it cannot connect, either choose a SQLite file in
 direct mode or make sure the `legacy-family-tree browse ...` process is still
