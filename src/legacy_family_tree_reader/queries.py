@@ -866,6 +866,7 @@ def _matching_person_id(
 def _normalize_marriage(marriage: JsonObject) -> JsonObject:
     _add_alias(marriage, "husband_person_id", "husband_individual_id")
     _add_alias(marriage, "wife_person_id", "wife_individual_id")
+    _add_alias(marriage, "private_flag", "private")
     return marriage
 
 
@@ -1042,6 +1043,309 @@ def _unique_people(rows: list[JsonObject]) -> list[JsonObject]:
             seen.add(person_id)
             result.append(row)
     return result
+
+
+def get_descendant_family_tree(
+    source: DatabaseSource,
+    dataset_id: Any,
+    first_person_id: Any,
+    second_person_id: Any,
+    max_depth: int = 100,
+) -> JsonObject | None:
+    """Return a couple's complete descendant families, including descendant spouses."""
+
+    max_depth = max(0, min(int(max_depth), 100))
+    with _connection(source) as connection:
+        people = _compact_people(connection, dataset_id, [first_person_id, second_person_id])
+        first_id = _matching_person_id(people, first_person_id)
+        second_id = _matching_person_id(people, second_person_id)
+        if first_id is None or second_id is None:
+            return None
+        if first_id == second_id:
+            raise ValueError("first and second must identify two different people")
+
+        root_ids = [first_id, second_id]
+        root_set = set(root_ids)
+        roles: dict[JsonValue, str] = {person_id: "root" for person_id in root_ids}
+        depths: dict[JsonValue, int] = {person_id: 0 for person_id in root_ids}
+        expanded_descendants: set[JsonValue] = set()
+        family_entries: list[tuple[JsonObject, int, bool, list[JsonValue], bool]] = []
+        links: list[JsonObject] = []
+        seen_families: set[tuple[JsonValue, JsonValue, JsonValue]] = set()
+        seen_links: set[tuple[JsonValue, JsonValue]] = set()
+        truncated = False
+
+        def family_key(marriage: JsonObject) -> tuple[JsonValue, JsonValue, JsonValue]:
+            return (
+                marriage.get("marriage_id"),
+                marriage.get("husband_person_id"),
+                marriage.get("wife_person_id"),
+            )
+
+        def add_families(
+            marriages: Sequence[JsonObject],
+            depth: int,
+            *,
+            root_union: bool,
+            include_children: bool,
+        ) -> list[JsonValue]:
+            nonlocal truncated
+            new_marriages = [
+                marriage for marriage in marriages if family_key(marriage) not in seen_families
+            ]
+            for marriage in new_marriages:
+                seen_families.add(family_key(marriage))
+            marriage_ids = _ordered_values(
+                [marriage.get("marriage_id") for marriage in new_marriages]
+            )
+            marriage_links = _marriage_links(connection, dataset_id, marriage_ids)
+            links_by_marriage: defaultdict[JsonValue, list[JsonObject]] = defaultdict(list)
+            for link in marriage_links:
+                links_by_marriage[link.get("parent_marriage_id")].append(link)
+
+            related_ids = [
+                person_id
+                for marriage in new_marriages
+                for person_id in (
+                    marriage.get("husband_person_id"),
+                    marriage.get("wife_person_id"),
+                )
+                if person_id is not None
+            ]
+            if include_children:
+                related_ids.extend(
+                    link.get("child_person_id")
+                    for link in marriage_links
+                    if link.get("child_person_id") is not None
+                )
+            people.update(
+                _compact_people(
+                    connection,
+                    dataset_id,
+                    [person_id for person_id in related_ids if person_id not in people],
+                )
+            )
+
+            next_frontier: list[JsonValue] = []
+            next_seen: set[JsonValue] = set()
+            for marriage in new_marriages:
+                marriage_id = marriage.get("marriage_id")
+                partner_ids = [
+                    person_id
+                    for person_id in (
+                        marriage.get("husband_person_id"),
+                        marriage.get("wife_person_id"),
+                    )
+                    if person_id is not None
+                ]
+                for partner_id in partner_ids:
+                    if partner_id not in people or partner_id in roles:
+                        continue
+                    roles[partner_id] = "spouse"
+                    depths[partner_id] = depth
+
+                child_ids: list[JsonValue] = []
+                marriage_child_links = links_by_marriage.get(marriage_id, [])
+                if not include_children and marriage_child_links:
+                    truncated = True
+                if include_children:
+                    for link in marriage_child_links:
+                        child_id = link.get("child_person_id")
+                        if child_id not in people:
+                            continue
+                        child_ids.append(child_id)
+                        if child_id not in root_set:
+                            if roles.get(child_id) == "descendant":
+                                depths[child_id] = min(depths[child_id], depth + 1)
+                            else:
+                                roles[child_id] = "descendant"
+                                depths[child_id] = depth + 1
+                            if child_id not in expanded_descendants and child_id not in next_seen:
+                                next_seen.add(child_id)
+                                next_frontier.append(child_id)
+                        link_key = (marriage_id, child_id)
+                        if link_key in seen_links:
+                            continue
+                        seen_links.add(link_key)
+                        tree_link: JsonObject = {
+                            "marriage_id": marriage_id,
+                            "parent_marriage_id": marriage_id,
+                            "from_person_ids": partner_ids,
+                            "parent_person_ids": partner_ids,
+                            "to_person_id": child_id,
+                            "child_person_id": child_id,
+                            "relationship": "child",
+                            "depth": depth + 1,
+                        }
+                        privacy_flags = {
+                            name: value for name, value in link.items() if "private" in name
+                        }
+                        if privacy_flags:
+                            tree_link["privacy_flags"] = privacy_flags
+                        links.append(tree_link)
+                family_entries.append(
+                    (
+                        marriage,
+                        depth,
+                        root_union,
+                        _ordered_values(child_ids),
+                        not include_children and bool(marriage_child_links),
+                    )
+                )
+            return next_frontier
+
+        root_marriages = _own_marriages(connection, dataset_id, [first_id], full=True)
+        shared_marriages = [
+            marriage
+            for marriage in root_marriages
+            if {
+                marriage.get("husband_person_id"),
+                marriage.get("wife_person_id"),
+            }
+            == root_set
+        ]
+
+        if shared_marriages:
+            frontier = add_families(
+                shared_marriages,
+                0,
+                root_union=True,
+                include_children=max_depth >= 1,
+            )
+            depth = 1
+            while frontier and depth <= max_depth:
+                current = [
+                    person_id for person_id in frontier if person_id not in expanded_descendants
+                ]
+                expanded_descendants.update(current)
+                marriages = _own_marriages(connection, dataset_id, current, full=True)
+                frontier = add_families(
+                    marriages,
+                    depth,
+                    root_union=False,
+                    include_children=depth < max_depth,
+                )
+                depth += 1
+
+        role_order = {"root": 0, "descendant": 1, "spouse": 2}
+        ordered_person_ids = sorted(
+            roles,
+            key=lambda person_id: (
+                depths[person_id],
+                role_order[roles[person_id]],
+                _value_order(person_id),
+            ),
+        )
+        person_items: dict[JsonValue, JsonObject] = {}
+        for person_id in ordered_person_ids:
+            item = _person_reference(people[person_id])
+            item["depth"] = depths[person_id]
+            item["role"] = roles[person_id]
+            person_items[person_id] = item
+
+        families: list[JsonObject] = []
+        for marriage, depth, root_union, child_ids, children_truncated in family_entries:
+            husband_id = marriage.get("husband_person_id")
+            wife_id = marriage.get("wife_person_id")
+            family = {
+                field: marriage.get(field)
+                for field in (
+                    "dataset_id",
+                    "marriage_id",
+                    "legacy_id",
+                    "marriage_date",
+                    "marriage_sort_date",
+                    "marriage_end_date",
+                    "marriage_end_sort_date",
+                    "marriage_status_id",
+                    "not_married",
+                    "no_children",
+                    "private_flag",
+                )
+                if field in marriage
+            }
+            family.update(
+                {
+                    "depth": depth,
+                    "root_union": root_union,
+                    "husband_person_id": husband_id,
+                    "wife_person_id": wife_id,
+                    "partner_person_ids": [
+                        person_id for person_id in (husband_id, wife_id) if person_id is not None
+                    ],
+                    "husband": (
+                        _person_reference(people[husband_id]) if husband_id in people else None
+                    ),
+                    "wife": _person_reference(people[wife_id]) if wife_id in people else None,
+                    "partners": [
+                        _person_reference(people[person_id])
+                        for person_id in (husband_id, wife_id)
+                        if person_id in people
+                    ],
+                    "child_ids": child_ids,
+                    "children_truncated": children_truncated,
+                }
+            )
+            if "marriage_date" in family:
+                family["marriage_date_display"] = decode_legacy_date(family["marriage_date"])
+            if "marriage_end_date" in family:
+                family["marriage_end_date_display"] = decode_legacy_date(
+                    family["marriage_end_date"]
+                )
+            families.append(family)
+
+        for link in links:
+            child_id = link.get("child_person_id")
+            parent_ids = link.get("parent_person_ids")
+            if not isinstance(parent_ids, list):
+                parent_ids = []
+            link["parent_references"] = [
+                _person_reference(people[parent_id])
+                for parent_id in parent_ids
+                if parent_id in people
+            ]
+            link["child"] = _person_reference(people[child_id]) if child_id in people else None
+
+        generations = []
+        for depth in sorted(set(depths.values())):
+            generation_ids = [
+                person_id for person_id in ordered_person_ids if depths[person_id] == depth
+            ]
+            generations.append(
+                {
+                    "depth": depth,
+                    "person_ids": generation_ids,
+                    "people": [person_items[person_id] for person_id in generation_ids],
+                }
+            )
+
+        status = "ok" if shared_marriages else "no_shared_union"
+        payload: JsonObject = {
+            "status": status,
+            "message": (
+                None
+                if shared_marriages
+                else "The root people do not share a marriage union in this dataset."
+            ),
+            "dataset_id": dataset_id,
+            "max_depth": max_depth,
+            "truncated": truncated,
+            "roots": [_person_reference(people[person_id]) for person_id in root_ids],
+            "people": [person_items[person_id] for person_id in ordered_person_ids],
+            "families": families,
+            "links": links,
+            "generations": generations,
+            "counts": {
+                "roots": len(root_ids),
+                "descendants": sum(role == "descendant" for role in roles.values()),
+                "spouses": sum(role == "spouse" for role in roles.values()),
+                "people": len(roles),
+                "families": len(families),
+                "links": len(links),
+                "generations": len(generations),
+            },
+        }
+        return payload
 
 
 def get_family(source: DatabaseSource, dataset_id: Any, person_id: Any) -> JsonObject | None:

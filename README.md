@@ -165,7 +165,9 @@ remains available and includes alternate names, while exact and partial primary
 given-name/surname matches rank ahead of alternate-name matches. Person pages
 have persistent `/dataset/DATASET/person/PERSON` routes and an interactive
 ancestor or descendant pedigree with generation, zoom, pan, and recenter
-controls.
+controls. The dedicated **Full tree** tab at `/full-tree` shows every recorded
+descendant of Douglas and Martha Patten, grouping spouses into the union that
+connects each branch.
 
 The browser can also open a descriptive SQLite database directly without
 running the Python server. Open

@@ -676,6 +676,162 @@
     };
   }
 
+  function getFullTree(datasetId, firstPersonId, secondPersonId, maxDepth) {
+    const data = loadFamilyGraph(datasetId);
+    const firstKey = idKey(firstPersonId);
+    const secondKey = idKey(secondPersonId);
+    const roots = [firstKey, secondKey]
+      .map((key) => data.people.get(key))
+      .filter(Boolean)
+      .map(personReference);
+    if (roots.length !== 2 || firstKey === secondKey) return null;
+    const rootMarriage = data.marriages.find((marriage) => {
+      const partners = new Set([
+        marriage.husband_person_id,
+        marriage.wife_person_id
+      ].filter((id) => id !== null && id !== undefined).map(idKey));
+      return partners.has(firstKey) && partners.has(secondKey);
+    });
+
+    const childLinksByMarriage = new Map();
+    data.children.forEach((link) => {
+      const key = idKey(link.parent_marriage_id);
+      if (!childLinksByMarriage.has(key)) childLinksByMarriage.set(key, []);
+      childLinksByMarriage.get(key).push(link);
+    });
+    childLinksByMarriage.forEach((links) => links.sort((left, right) =>
+      Number(left.child_order ?? 0) - Number(right.child_order ?? 0)));
+
+    const marriagesByPerson = new Map();
+    data.marriages.forEach((marriage) => {
+      [marriage.husband_person_id, marriage.wife_person_id].forEach((id) => {
+        if (id === null || id === undefined || !data.people.has(idKey(id))) return;
+        const key = idKey(id);
+        if (!marriagesByPerson.has(key)) marriagesByPerson.set(key, []);
+        marriagesByPerson.get(key).push(marriage);
+      });
+    });
+
+    const people = new Map();
+    const rolePriority = { spouse: 1, descendant: 2, root: 3 };
+    function includePerson(key, depth, role) {
+      const source = data.people.get(key);
+      if (!source) return;
+      const existing = people.get(key);
+      if (existing && (existing.depth < depth || (existing.depth === depth && rolePriority[existing.role] >= rolePriority[role]))) return;
+      const reference = personReference(source);
+      reference.depth = depth;
+      reference.role = role;
+      people.set(key, reference);
+    }
+    includePerson(firstKey, 0, "root");
+    includePerson(secondKey, 0, "root");
+
+    const families = [];
+    const familyKeys = new Set();
+    const links = [];
+    let truncated = false;
+    function includeFamily(marriage, depth, rootUnion, includeChildren) {
+      if (!marriage) return [];
+      const marriageKey = idKey(marriage.marriage_id);
+      if (familyKeys.has(marriageKey)) return [];
+      familyKeys.add(marriageKey);
+      const partnerIds = [marriage.husband_person_id, marriage.wife_person_id]
+        .filter((id) => id !== null && id !== undefined && data.people.has(idKey(id)));
+      const recordedChildIds = (childLinksByMarriage.get(marriageKey) || [])
+        .map((link) => link.child_person_id)
+        .filter((id) => id !== null && id !== undefined && data.people.has(idKey(id)));
+      const childIds = includeChildren ? recordedChildIds : [];
+      if (!includeChildren && recordedChildIds.length) truncated = true;
+      const family = {
+        depth,
+        marriage_id: marriage.marriage_id,
+        partner_ids: partnerIds,
+        partners: partnerIds.map((id) => personReference(data.people.get(idKey(id)))),
+        child_ids: childIds,
+        children: childIds.map((id) => personReference(data.people.get(idKey(id)))),
+        root_union: rootUnion,
+        children_truncated: !includeChildren && recordedChildIds.length > 0
+      };
+      families.push(family);
+      childIds.forEach((childId) => {
+        links.push({
+          from_family_id: marriage.marriage_id,
+          marriage_id: marriage.marriage_id,
+          to_person_id: childId,
+          child_person_id: childId,
+          relationship: "child"
+        });
+      });
+      return childIds.map(idKey);
+    }
+
+    const queue = [];
+    const descendantDepth = new Map();
+    if (rootMarriage) {
+      includeFamily(rootMarriage, 0, true, maxDepth >= 1).forEach((childKey) => {
+        includePerson(childKey, 1, "descendant");
+        descendantDepth.set(childKey, 1);
+        queue.push(childKey);
+      });
+    }
+    for (let index = 0; index < queue.length; index += 1) {
+      const currentKey = queue[index];
+      const depth = descendantDepth.get(currentKey);
+      if (depth === undefined || depth > maxDepth) continue;
+      (marriagesByPerson.get(currentKey) || []).forEach((marriage) => {
+        [marriage.husband_person_id, marriage.wife_person_id].forEach((partnerId) => {
+          if (partnerId === null || partnerId === undefined) return;
+          const partnerKey = idKey(partnerId);
+          includePerson(partnerKey, depth, partnerKey === currentKey ? "descendant" : "spouse");
+        });
+        includeFamily(marriage, depth, false, depth < maxDepth).forEach((childKey) => {
+          const childDepth = depth + 1;
+          includePerson(childKey, childDepth, "descendant");
+          if (!descendantDepth.has(childKey) || childDepth < descendantDepth.get(childKey)) {
+            descendantDepth.set(childKey, childDepth);
+            queue.push(childKey);
+          }
+        });
+      });
+    }
+
+    const generations = new Map();
+    people.forEach((person) => {
+      if (!generations.has(person.depth)) generations.set(person.depth, { people: [], families: [] });
+      generations.get(person.depth).people.push(person);
+    });
+    families.forEach((family) => {
+      if (!generations.has(family.depth)) generations.set(family.depth, { people: [], families: [] });
+      generations.get(family.depth).families.push(family);
+    });
+    const peopleList = Array.from(people.values());
+    return {
+      status: rootMarriage ? "ok" : "no_shared_union",
+      message: rootMarriage ? null : "The root people do not share a marriage union in this dataset.",
+      dataset_id: datasetId,
+      max_depth: maxDepth,
+      truncated,
+      roots,
+      people: peopleList,
+      families,
+      marriages: families,
+      links,
+      generations: Array.from(generations).sort((left, right) => left[0] - right[0])
+        .map(([depth, generation]) => ({ depth, ...generation })),
+      counts: {
+        roots: roots.length,
+        descendants: peopleList.filter((person) => person.role === "descendant").length,
+        spouses: peopleList.filter((person) => person.role === "spouse").length,
+        people: people.size,
+        families: families.length,
+        links: links.length,
+        generations: generations.size
+      },
+      root_union: rootMarriage ? rootMarriage.marriage_id : null
+    };
+  }
+
   function shortestRelationship(datasetId, fromPersonId, toPersonId) {
     const data = loadFamilyGraph(datasetId);
     const start = idKey(fromPersonId);
@@ -774,6 +930,15 @@
     if (url.pathname === "/api/datasets") return listDatasets();
     if (url.pathname === "/api/people") return listPeople(url.searchParams);
     if (url.pathname === "/api/people/search") return searchPeople(url.searchParams);
+    if (url.pathname === "/api/full-tree") {
+      const datasetId = parseIdentifier(firstParameter(url.searchParams, "dataset"), "dataset");
+      const firstId = parseIdentifier(firstParameter(url.searchParams, "first"), "first");
+      const secondId = parseIdentifier(firstParameter(url.searchParams, "second"), "second");
+      const generations = bounded(firstParameter(url.searchParams, "generations"), "generations", 100, 0, 100);
+      const result = getFullTree(datasetId, firstId, secondId, generations);
+      if (result === null) throw new Error("One or both root people were not found");
+      return result;
+    }
     if (url.pathname === "/api/relationship") {
       const datasetId = parseIdentifier(firstParameter(url.searchParams, "dataset_id"), "dataset_id");
       const fromId = parseIdentifier(firstParameter(url.searchParams, "from_person_id"), "from_person_id");

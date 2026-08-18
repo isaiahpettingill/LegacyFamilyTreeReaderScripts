@@ -214,6 +214,50 @@ select:disabled {
   background: #6f261f;
 }
 
+.archive-tabs {
+  display: flex;
+  gap: 0;
+  padding-inline: max(4vw, calc((100vw - 84rem) / 2));
+  border-bottom: 1px solid var(--rule);
+  background: #e9dfca;
+}
+
+.archive-tab {
+  position: relative;
+  min-width: 12rem;
+  padding: .9rem 1.3rem .8rem;
+  border: 0;
+  border-inline: 1px solid transparent;
+  color: var(--ink-soft);
+  background: transparent;
+  font-family: Arial, sans-serif;
+  font-size: .78rem;
+  font-weight: 700;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+}
+
+.archive-tab:hover {
+  color: var(--red-dark);
+  background: rgb(255 253 247 / 45%);
+}
+
+.archive-tab[aria-selected="true"] {
+  color: var(--ink);
+  border-inline-color: var(--rule);
+  background: var(--white);
+}
+
+.archive-tab[aria-selected="true"]::after {
+  content: "";
+  position: absolute;
+  right: .9rem;
+  bottom: -1px;
+  left: .9rem;
+  height: 4px;
+  background: var(--red);
+}
+
 .workspace {
   display: grid;
   grid-template-columns: minmax(17rem, 24rem) minmax(0, 1fr);
@@ -805,6 +849,320 @@ footer {
   text-align: center;
 }
 
+.full-tree-panel {
+  width: min(100%, 108rem);
+  min-height: 72vh;
+  margin: 0 auto;
+  padding: clamp(1.25rem, 4vw, 3.5rem);
+  background: var(--white);
+  box-shadow: var(--shadow);
+}
+
+.full-tree-header {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 2rem;
+  padding-bottom: 1.5rem;
+  border-bottom: 3px double var(--rule);
+}
+
+.full-tree-header h2 {
+  margin: 0;
+  font-size: clamp(2.2rem, 5vw, 4.8rem);
+  font-weight: 400;
+  line-height: 1.04;
+}
+
+.full-tree-header > div > p:last-child {
+  max-width: 44rem;
+  margin: .75rem 0 0;
+  color: var(--ink-soft);
+  font-style: italic;
+}
+
+.full-tree-summary {
+  flex: 0 0 auto;
+  padding: .85rem 1rem;
+  border-left: 4px solid var(--red);
+  background: var(--paper);
+  font-family: Arial, sans-serif;
+  text-align: right;
+}
+
+.full-tree-summary:empty {
+  display: none;
+}
+
+.full-tree-summary strong,
+.full-tree-summary span {
+  display: block;
+}
+
+.full-tree-summary strong {
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 1.2rem;
+  font-weight: 400;
+}
+
+.full-tree-summary span {
+  margin-top: .15rem;
+  color: var(--ink-soft);
+  font-size: .7rem;
+}
+
+.full-tree-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-top: 1.25rem;
+  padding: .75rem 1rem;
+  border: 1px solid var(--rule);
+  background: #f7f2e7;
+}
+
+.full-tree-toolbar > p {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: .82rem;
+  font-style: italic;
+}
+
+.full-tree-state {
+  min-height: 1.3rem;
+}
+
+.full-tree-content {
+  position: relative;
+  min-height: 36rem;
+  height: 72vh;
+  overflow: auto;
+  border: 1px solid var(--rule);
+  background:
+    radial-gradient(circle at 1px 1px, rgb(142 130 105 / 24%) 1px, transparent 1.5px),
+    #f8f3e8;
+  background-size: 1.5rem 1.5rem;
+  cursor: grab;
+  overscroll-behavior: contain;
+  touch-action: pan-x pan-y;
+}
+
+.full-tree-content.is-panning {
+  cursor: grabbing;
+  user-select: none;
+}
+
+.full-tree-surface {
+  min-width: 100%;
+  min-height: 100%;
+}
+
+.full-tree-map {
+  position: relative;
+  min-height: 100%;
+  padding: 3rem 2rem 5rem;
+  transform-origin: 0 0;
+}
+
+.full-tree-lines {
+  position: absolute;
+  z-index: 0;
+  inset: 0;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.full-tree-lines path {
+  fill: none;
+  stroke: #786b54;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+
+.full-tree-generation {
+  position: relative;
+  z-index: 1;
+  min-height: 15rem;
+  padding: 1.25rem 1rem 4rem;
+  border-top: 1px solid rgb(184 169 138 / 52%);
+}
+
+.full-tree-generation:first-of-type {
+  border-top: 0;
+}
+
+.generation-marker {
+  position: sticky;
+  z-index: 3;
+  left: 1rem;
+  display: inline-flex;
+  align-items: baseline;
+  gap: .65rem;
+  margin-bottom: 1rem;
+  padding: .3rem .6rem;
+  color: var(--white);
+  background: var(--green);
+  box-shadow: 3px 3px 0 var(--paper-deep);
+  font-family: Arial, sans-serif;
+}
+
+.generation-marker span {
+  font-size: .7rem;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.generation-marker small {
+  color: #ddd3bf;
+  font-size: .62rem;
+}
+
+.full-tree-groups {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-around;
+  gap: 2.5rem;
+}
+
+.full-tree-family,
+.full-tree-single {
+  position: relative;
+  flex: 0 0 auto;
+  width: 22rem;
+  padding: .7rem;
+  border: 1px solid #9e8f72;
+  border-top: 5px solid var(--green);
+  background: #eee4d0;
+  box-shadow: 0 8px 20px rgb(50 39 24 / 14%);
+}
+
+.full-tree-family.is-root {
+  border: 2px solid var(--red-dark);
+  border-top: 6px solid var(--red);
+  background: #e8dac0;
+  box-shadow: 0 10px 28px rgb(50 39 24 / 22%);
+}
+
+.full-tree-single {
+  width: 12rem;
+  border-top-color: var(--red);
+}
+
+.family-card-label {
+  margin: 0 0 .45rem;
+  color: var(--red);
+  font-family: Arial, sans-serif;
+  font-size: .6rem;
+  font-weight: 700;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+
+.full-tree-couple {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: .55rem;
+}
+
+.full-tree-person {
+  min-width: 0;
+  min-height: 5.4rem;
+  padding: .7rem;
+  color: var(--ink);
+  border: 1px solid #b8a98a;
+  background: var(--white);
+  box-shadow: 0 3px 8px rgb(50 39 24 / 10%);
+  text-align: left;
+}
+
+.full-tree-person:hover {
+  color: var(--red-dark);
+  border-color: var(--red);
+  background: #fffaf0;
+  transform: translateY(-2px);
+}
+
+.full-tree-person strong,
+.full-tree-person span,
+.full-tree-person small {
+  display: block;
+}
+
+.full-tree-person strong {
+  font-size: .92rem;
+  font-weight: 400;
+  line-height: 1.22;
+}
+
+.full-tree-person span {
+  margin-top: .35rem;
+  color: var(--ink-soft);
+  font-size: .68rem;
+  font-style: italic;
+}
+
+.full-tree-person small {
+  margin-top: .35rem;
+  color: var(--red);
+  font-family: Arial, sans-serif;
+  font-size: .55rem;
+  line-height: 1.25;
+}
+
+.missing-partner {
+  display: grid;
+  min-height: 5.4rem;
+  place-items: center;
+  padding: .7rem;
+  color: var(--ink-soft);
+  border: 1px dashed var(--rule);
+  background: rgb(255 253 247 / 42%);
+  font-size: .72rem;
+  font-style: italic;
+  text-align: center;
+}
+
+.family-child-port {
+  position: relative;
+  margin: .6rem -.7rem -.7rem;
+  padding: .4rem .7rem;
+  color: var(--ink-soft);
+  border-top: 1px solid var(--rule);
+  background: rgb(255 253 247 / 48%);
+  font-family: Arial, sans-serif;
+  font-size: .6rem;
+  text-align: center;
+  text-transform: uppercase;
+}
+
+.family-child-port::after {
+  content: "";
+  position: absolute;
+  bottom: -.55rem;
+  left: calc(50% - .3rem);
+  width: .6rem;
+  height: .6rem;
+  border: 2px solid #786b54;
+  border-radius: 50%;
+  background: var(--paper);
+}
+
+.full-tree-empty {
+  max-width: 32rem;
+  margin: 8rem auto;
+  text-align: center;
+}
+
+.full-tree-empty h3 {
+  margin: .25rem 0;
+  font-size: 1.8rem;
+  font-weight: 400;
+}
+
 .relationship-ledger {
   display: grid;
   grid-template-columns: minmax(15rem, .65fr) minmax(20rem, 1.35fr);
@@ -1005,9 +1363,49 @@ footer p {
     min-height: 6rem;
     flex-basis: 10.5rem;
   }
+
+  .full-tree-panel {
+    padding-inline: .8rem;
+  }
+
+  .full-tree-header {
+    display: block;
+  }
+
+  .full-tree-summary {
+    width: fit-content;
+    margin-top: 1rem;
+    text-align: left;
+  }
+
+  .full-tree-toolbar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .full-tree-toolbar .zoom-controls {
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .full-tree-content {
+    min-height: 30rem;
+    height: 68vh;
+  }
 }
 
 @media (max-width: 560px) {
+  .archive-tabs {
+    padding-inline: 0;
+  }
+
+  .archive-tab {
+    min-width: 0;
+    flex: 1 1 50%;
+    padding-inline: .6rem;
+    font-size: .7rem;
+  }
+
   .archive-controls {
     grid-template-columns: 1fr;
   }
@@ -1020,6 +1418,22 @@ footer p {
   .pagination {
     width: 100%;
     justify-content: space-between;
+  }
+
+  .full-tree-header h2 {
+    font-size: 2.45rem;
+  }
+
+  .full-tree-map {
+    padding-inline: 1rem;
+  }
+
+  .full-tree-family {
+    width: 19rem;
+  }
+
+  .full-tree-groups {
+    gap: 1.5rem;
   }
 }
 

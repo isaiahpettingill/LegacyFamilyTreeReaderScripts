@@ -24,6 +24,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTex
 
 from .queries import (
     connect_read_only,
+    get_descendant_family_tree,
     get_family,
     get_person,
     get_person_facts,
@@ -109,11 +110,16 @@ def _json(payload: Any, status: HTTPStatus = HTTPStatus.OK) -> JSONResponse:
     )
 
 
-def _api_call(callback: Callable[[], Any], *, missing_person: bool = False) -> JSONResponse:
+def _api_call(
+    callback: Callable[[], Any],
+    *,
+    missing_person: bool = False,
+    missing_message: str = "Person not found",
+) -> JSONResponse:
     try:
         payload = callback()
         if missing_person and payload is None:
-            return _json({"error": "Person not found"}, HTTPStatus.NOT_FOUND)
+            return _json({"error": missing_message}, HTTPStatus.NOT_FOUND)
         return _json(payload)
     except (ValueError, TypeError) as error:
         return _json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
@@ -346,6 +352,29 @@ def create_app(
             )
         )
 
+    @app.api_route("/api/full-tree", methods=["GET", "HEAD"])
+    def full_tree(request: Request) -> JSONResponse:
+        parameters = _parameters(request)
+        dataset = _first(parameters, "dataset", "dataset_id")
+        first = _first(parameters, "first", "first_person_id")
+        second = _first(parameters, "second", "second_person_id")
+        if dataset is None or first is None or second is None:
+            return _json(
+                {"error": "dataset, first, and second query parameters are required"},
+                HTTPStatus.BAD_REQUEST,
+            )
+        return _api_call(
+            lambda: get_descendant_family_tree(
+                path,
+                _identifier(dataset),
+                _identifier(first),
+                _identifier(second),
+                max_depth=int(_first(parameters, "max_depth", "generations") or "100"),
+            ),
+            missing_person=True,
+            missing_message="One or both root people were not found",
+        )
+
     def person_response(
         request: Request,
         dataset_text: str,
@@ -417,6 +446,10 @@ def create_app(
     )
     def person_page(dataset: str, person_id: str) -> FileResponse:
         del dataset, person_id
+        return FileResponse(static_root / "index.html")
+
+    @app.api_route("/full-tree", methods=["GET", "HEAD"], include_in_schema=False)
+    def full_tree_page() -> FileResponse:
         return FileResponse(static_root / "index.html")
 
     @app.api_route("/data/{data_path:path}", methods=["GET", "HEAD"], include_in_schema=False)

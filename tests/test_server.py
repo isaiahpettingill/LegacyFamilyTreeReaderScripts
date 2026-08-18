@@ -60,10 +60,12 @@ def test_packaged_assets_deep_route_and_data_are_separated(merged_db: Path) -> N
     with TestClient(create_app(merged_db)) as client:
         index = client.get("/")
         deep_route = client.get("/dataset/1/person/3")
+        full_tree_route = client.get("/full-tree")
         asset = client.get("/app.js")
 
-        assert index.status_code == deep_route.status_code == asset.status_code == 200
+        assert index.status_code == deep_route.status_code == full_tree_route.status_code == 200
         assert deep_route.content == index.content
+        assert full_tree_route.content == index.content
         assert "Legacy Family Archive" in index.text
         assert '<script src="vendor/sql-asm.js"' not in index.text
         assert '<script src="standalone.js"' not in index.text

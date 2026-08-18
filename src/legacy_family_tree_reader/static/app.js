@@ -34,6 +34,18 @@ const elements = {
   treeZoomIn: document.querySelector("#tree-zoom-in"),
   treeZoomReset: document.querySelector("#tree-zoom-reset"),
   treeZoomLevel: document.querySelector("#tree-zoom-level"),
+  skipLink: document.querySelector("#skip-link"),
+  peopleTab: document.querySelector("#people-tab"),
+  fullTreeTab: document.querySelector("#full-tree-tab"),
+  peoplePanel: document.querySelector("#people-panel"),
+  fullTreePanel: document.querySelector("#full-tree-panel"),
+  fullTreeSummary: document.querySelector(".full-tree-summary"),
+  fullTreeState: document.querySelector("#full-tree-state"),
+  fullTree: document.querySelector("#full-tree-content"),
+  fullTreeZoomOut: document.querySelector("#full-tree-zoom-out"),
+  fullTreeZoomIn: document.querySelector("#full-tree-zoom-in"),
+  fullTreeZoomReset: document.querySelector("#full-tree-zoom-reset"),
+  fullTreeZoomLevel: document.querySelector("#full-tree-zoom-level"),
   personACard: document.querySelector("#person-a-card"),
   personBCard: document.querySelector("#person-b-card"),
   relationshipButton: document.querySelector("#find-relationship"),
@@ -68,10 +80,21 @@ const state = {
   treeSurface: null,
   treeCards: null,
   treeGraphs: [],
-  treeRootId: ""
+  treeRootId: "",
+  lastPeopleRoute: { kind: "root" },
+  fullTreeController: null,
+  fullTreeLoadKey: "",
+  fullTreeScale: 1,
+  fullTreeMap: null,
+  fullTreeSurface: null,
+  fullTreeFamilies: [],
+  fullTreePersonCards: new Map()
 };
 
 const BROWSE_PAGE_SIZE = 100;
+const FULL_TREE_DATASET_ID = "1";
+const FULL_TREE_ROOT_IDS = ["1", "2"];
+const FULL_TREE_PATH = "/api/full-tree?dataset=1&first=1&second=2&generations=100";
 const ROUTE_ID_PATTERN = /^[^\u0000-\u001f\u007f]{1,256}$/;
 let standaloneLoader = null;
 
@@ -222,6 +245,7 @@ function parseRoute() {
   if (!raw || raw === "/" || (window.location.protocol !== "file:" && /\/index\.html\/?$/.test(raw))) {
     return { kind: "root" };
   }
+  if (/^\/full-tree\/?$/.test(raw)) return { kind: "full-tree" };
   const match = /^\/dataset\/([^/]+)\/person\/([^/]+)\/?$/.exec(raw);
   if (!match) return { kind: "invalid", message: "The archive link is not a recognized person route." };
   const routeDatasetId = decodeRouteId(match[1]);
@@ -233,6 +257,7 @@ function parseRoute() {
 }
 
 function routeText(route) {
+  if (route.kind === "full-tree") return "/full-tree";
   if (route.kind !== "person") return "/";
   return `/dataset/${encodeURIComponent(route.datasetId)}/person/${encodeURIComponent(route.personId)}`;
 }
@@ -264,10 +289,23 @@ async function applyRoute(summary = null) {
   if (!state.datasetsReady) return;
   const route = parseRoute();
   if (route.kind === "invalid") {
+    showTopLevelView("people");
     clearSelectedPerson();
     setMessage(elements.appStatus, `${route.message} Return to the archive root and choose a person.`, "error");
     return;
   }
+  if (route.kind === "full-tree") {
+    state.routeVersion += 1;
+    state.recordController?.abort();
+    state.treeController?.abort();
+    showTopLevelView("full-tree");
+    writeRoute(route, true);
+    setMessage(elements.appStatus, "");
+    loadFullTree();
+    return;
+  }
+  showTopLevelView("people");
+  state.lastPeopleRoute = route;
   if (route.kind === "root") {
     setMessage(elements.appStatus, "");
     clearSelectedPerson();
@@ -306,6 +344,18 @@ function openPerson(summary) {
   }
   writeRoute(route);
   applyRoute(summary);
+}
+
+function showTopLevelView(view) {
+  const fullTree = view === "full-tree";
+  elements.peoplePanel.hidden = fullTree;
+  elements.fullTreePanel.hidden = !fullTree;
+  elements.peopleTab.setAttribute("aria-selected", String(!fullTree));
+  elements.fullTreeTab.setAttribute("aria-selected", String(fullTree));
+  elements.peopleTab.tabIndex = fullTree ? -1 : 0;
+  elements.fullTreeTab.tabIndex = fullTree ? 0 : -1;
+  elements.skipLink.href = fullTree ? "#full-tree-panel" : "#main-content";
+  elements.skipLink.textContent = fullTree ? "Skip to full family tree" : "Skip to family records";
 }
 
 class ApiRequestError extends Error {
@@ -594,9 +644,11 @@ function cancelActiveRequests() {
   state.catalogController?.abort();
   state.recordController?.abort();
   state.treeController?.abort();
+  state.fullTreeController?.abort();
   state.relationshipController?.abort();
   state.catalogRequestId += 1;
   state.catalogBusy = false;
+  state.fullTreeLoadKey = "";
 }
 
 function loadScript(path) {
@@ -689,6 +741,7 @@ async function initializeHttp() {
 }
 
 function initialize() {
+  showTopLevelView(parseRoute().kind === "full-tree" ? "full-tree" : "people");
   if (window.location.protocol === "file:") {
     state.transport = "standalone";
     setSourceMode("direct");
@@ -1215,6 +1268,423 @@ function resetTreeView() {
   centerTree();
 }
 
+function fullTreeReferenceId(value) {
+  if (value && typeof value === "object") return personId(value);
+  return value === undefined || value === null || value === "" ? "" : String(value);
+}
+
+function fullTreeGraph(payload) {
+  const byId = new Map();
+  const depths = new Map();
+  const roles = new Map();
+  function addPerson(candidate, fallbackDepth, fallbackRole) {
+    if (candidate && typeof candidate === "object") {
+      candidate = candidate.person || candidate.individual || candidate.reference || candidate;
+    }
+    const id = fullTreeReferenceId(candidate);
+    if (!id) return "";
+    const existing = byId.get(id) || { person_id: id };
+    if (candidate && typeof candidate === "object") byId.set(id, { ...existing, ...candidate });
+    else if (!byId.has(id)) byId.set(id, existing);
+    const rawDepth = candidate && typeof candidate === "object"
+      ? firstValue(candidate, ["depth", "generation", "level"])
+      : fallbackDepth;
+    const depth = Number(rawDepth ?? fallbackDepth);
+    if (Number.isFinite(depth) && depth >= 0 && (!depths.has(id) || depth < depths.get(id))) depths.set(id, depth);
+    const role = candidate && typeof candidate === "object"
+      ? firstValue(candidate, ["role", "relationship"])
+      : fallbackRole;
+    if (role && !roles.has(id)) roles.set(id, String(role));
+    return id;
+  }
+
+  const roots = listFrom(payload, ["roots", "root_people", "root"]);
+  roots.forEach((person) => addPerson(person, 0, "root"));
+  listFrom(payload, ["people", "persons", "individuals", "items"]).forEach((person) => addPerson(person));
+  listFrom(payload, ["generations"]).forEach((generation) => {
+    const depth = Number(firstValue(generation, ["depth", "generation", "level"]) ?? 0);
+    listFrom(generation, ["people", "persons", "items"]).forEach((person) => addPerson(person, depth));
+  });
+
+  const topRootUnion = firstValue(payload, ["root_union", "root_marriage", "root_family"]);
+  const familyKeys = ["families", "marriages", "unions"];
+  const generationFamilies = listFrom(payload, ["generations"])
+    .flatMap((generation) => familyKeys.flatMap((key) => Array.isArray(generation?.[key]) ? generation[key] : []));
+  const rawFamilies = [
+    ...familyKeys.flatMap((key) => Array.isArray(payload?.[key]) ? payload[key] : []),
+    ...generationFamilies
+  ];
+  if (topRootUnion && typeof topRootUnion === "object") rawFamilies.push(topRootUnion);
+  const topRootUnionId = fullTreeReferenceId(topRootUnion && typeof topRootUnion === "object"
+    ? firstValue(topRootUnion, ["marriage_id", "family_id", "union_id", "id"])
+    : topRootUnion);
+  const links = listFrom(payload, ["links", "edges"]);
+  const linkedChildren = new Map();
+  links.forEach((link) => {
+    if (!link || typeof link !== "object") return;
+    const familyId = fullTreeReferenceId(firstValue(link, [
+      "marriage_id", "family_id", "union_id", "from_marriage_id", "source_family_id", "source_union_id"
+    ]));
+    const relationship = String(firstValue(link, ["relationship", "relation", "type"]) || "").toLowerCase();
+    const child = firstValue(link, ["child", "child_reference"]);
+    const childId = addPerson(child || firstValue(link, ["child_person_id", "child_id"]));
+    const targetId = addPerson(firstValue(link, ["to_person", "target", "to"]));
+    const resolvedChild = childId || (relationship.includes("child") ? targetId : "");
+    if (!familyId || !resolvedChild) return;
+    if (!linkedChildren.has(familyId)) linkedChildren.set(familyId, new Set());
+    linkedChildren.get(familyId).add(resolvedChild);
+  });
+
+  const seenFamilies = new Set();
+  const families = [];
+  rawFamilies.forEach((rawFamily, index) => {
+    if (!rawFamily || typeof rawFamily !== "object") return;
+    const rawId = firstValue(rawFamily, ["marriage_id", "family_id", "union_id", "id"]);
+    const id = fullTreeReferenceId(rawId) || `family-${index + 1}`;
+    if (seenFamilies.has(id)) return;
+    seenFamilies.add(id);
+    const partnerValues = [];
+    ["partners", "spouses", "couple", "parents", "people"].forEach((key) => {
+      if (Array.isArray(rawFamily[key])) partnerValues.push(...rawFamily[key]);
+    });
+    [
+      "first_partner", "second_partner", "first_person", "second_person", "partner_1", "partner_2",
+      "partner1", "partner2", "husband", "wife", "husband_reference", "wife_reference"
+    ].forEach((key) => {
+      if (rawFamily[key] !== undefined && rawFamily[key] !== null) partnerValues.push(rawFamily[key]);
+    });
+    [
+      "partner_ids", "person_ids", "spouse_ids", "parent_ids", "partner_person_ids"
+    ].forEach((key) => {
+      if (Array.isArray(rawFamily[key])) partnerValues.push(...rawFamily[key]);
+    });
+    [
+      "first_person_id", "second_person_id", "first_partner_id", "second_partner_id", "partner_1_id",
+      "partner_2_id", "partner1_id", "partner2_id", "husband_person_id", "wife_person_id",
+      "husband_individual_id", "wife_individual_id"
+    ].forEach((key) => {
+      if (rawFamily[key] !== undefined && rawFamily[key] !== null) partnerValues.push(rawFamily[key]);
+    });
+    const partnerIds = [];
+    partnerValues.forEach((partner) => {
+      const partnerId = addPerson(partner);
+      if (partnerId && !partnerIds.includes(partnerId)) partnerIds.push(partnerId);
+    });
+
+    const childValues = [];
+    ["children", "child_references"].forEach((key) => {
+      if (Array.isArray(rawFamily[key])) childValues.push(...rawFamily[key]);
+    });
+    ["child_ids", "child_person_ids", "children_ids"].forEach((key) => {
+      if (Array.isArray(rawFamily[key])) childValues.push(...rawFamily[key]);
+    });
+    const childIds = [];
+    childValues.forEach((child) => {
+      const childId = addPerson(child);
+      if (childId && !childIds.includes(childId)) childIds.push(childId);
+    });
+    (linkedChildren.get(id) || []).forEach((childId) => {
+      if (!childIds.includes(childId)) childIds.push(childId);
+    });
+    let depth = Number(firstValue(rawFamily, ["depth", "generation", "level"]));
+    if (!Number.isFinite(depth) || depth < 0) {
+      const knownDepths = partnerIds.map((partnerId) => depths.get(partnerId)).filter(Number.isFinite);
+      depth = knownDepths.length ? Math.min(...knownDepths) : 0;
+    }
+    partnerIds.forEach((partnerId) => {
+      if (!depths.has(partnerId)) depths.set(partnerId, depth);
+    });
+    childIds.forEach((childId) => {
+      if (!depths.has(childId) || depths.get(childId) > depth + 1) depths.set(childId, depth + 1);
+    });
+    const rootUnion = rawFamily.root_union === true || rawFamily.is_root_union === true || id === topRootUnionId;
+    families.push({ id, depth, partnerIds, childIds, rootUnion, raw: rawFamily });
+  });
+
+  const rootIds = roots.map(fullTreeReferenceId).filter(Boolean);
+  let rootFamily = families.find((family) => family.rootUnion);
+  if (!rootFamily && rootIds.length >= 2) {
+    rootFamily = families.find((family) => rootIds.every((id) => family.partnerIds.includes(id)));
+    if (rootFamily) rootFamily.rootUnion = true;
+  }
+  if (rootFamily) rootFamily.depth = 0;
+  rootIds.forEach((id) => depths.set(id, 0));
+  const missingRootIds = FULL_TREE_ROOT_IDS.filter((id) => !byId.has(id));
+  return {
+    roots: rootIds,
+    byId,
+    depths,
+    roles,
+    families,
+    links,
+    rootFamily,
+    missingRootIds,
+    counts: payload?.counts || {},
+    status: String(payload?.status || ""),
+    message: displayValue(payload?.message),
+    truncated: payload?.truncated === true
+  };
+}
+
+function openFullTreePerson(person) {
+  const id = personId(person);
+  const datasetAvailable = Array.from(elements.dataset.options).some((option) => option.value === FULL_TREE_DATASET_ID);
+  if (!id || !datasetAvailable) {
+    setMessage(elements.fullTreeState, "This tree's record collection is not available, so the person record cannot be opened.", "error");
+    return;
+  }
+  const route = { kind: "person", datasetId: FULL_TREE_DATASET_ID, personId: id };
+  writeRoute(route);
+  applyRoute(person);
+}
+
+function fullTreePersonCard(person, context, repeated) {
+  const details = lifeSummary(person);
+  const button = element("button", { className: "full-tree-person", type: "button" }, [
+    element("strong", { text: personName(person) }),
+    element("span", { text: details }),
+    repeated ? element("small", { text: "Also appears in another family group" }) : null
+  ]);
+  button.setAttribute("aria-label", `${personName(person)}, ${details}. ${context}. Open person record.`);
+  button.addEventListener("click", () => openFullTreePerson(person));
+  return button;
+}
+
+function renderFullTree(payload) {
+  const graph = fullTreeGraph(payload);
+  if (!graph.byId.size) {
+    elements.fullTree.replaceChildren(element("div", { className: "full-tree-empty" }, [
+      element("p", { className: "folio", text: "No entries" }),
+      element("h3", { text: "No full-tree people were returned" }),
+      element("p", { text: "The archive did not return either root or any descendant records." })
+    ]));
+    elements.fullTreeSummary.replaceChildren();
+    setMessage(elements.fullTreeState, "No family tree is available for these roots.");
+    return;
+  }
+
+  const appearances = new Map();
+  graph.families.forEach((family) => family.partnerIds.forEach((id) => appearances.set(id, (appearances.get(id) || 0) + 1)));
+  const laneItems = new Map();
+  graph.families.forEach((family) => {
+    if (!laneItems.has(family.depth)) laneItems.set(family.depth, { families: [], singles: [] });
+    laneItems.get(family.depth).families.push(family);
+  });
+  graph.byId.forEach((_person, id) => {
+    const depth = graph.depths.get(id) ?? 0;
+    const represented = graph.families.some((family) => family.depth === depth && family.partnerIds.includes(id));
+    if (represented) return;
+    if (!laneItems.has(depth)) laneItems.set(depth, { families: [], singles: [] });
+    laneItems.get(depth).singles.push(id);
+  });
+  const depths = [...laneItems.keys()].sort((left, right) => left - right);
+  if (!depths.length) depths.push(0);
+  const maxItems = Math.max(1, ...laneItems.values().map((items) => items.families.length + items.singles.length));
+  const surface = element("div", { className: "full-tree-surface" });
+  const map = element("div", { className: "full-tree-map" });
+  map.style.width = `${Math.max(960, maxItems * 390)}px`;
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("class", "full-tree-lines");
+  svg.setAttribute("aria-hidden", "true");
+  map.append(svg);
+  const personCards = new Map();
+  const familyElements = [];
+
+  function rememberPersonCard(id, card) {
+    if (!personCards.has(id)) personCards.set(id, []);
+    personCards.get(id).push(card);
+  }
+
+  depths.forEach((depth) => {
+    const items = laneItems.get(depth) || { families: [], singles: [] };
+    const lane = element("section", { className: "full-tree-generation" });
+    lane.setAttribute("aria-label", depth === 0 ? "Root generation" : `Descendant generation ${depth}`);
+    lane.append(element("div", { className: "generation-marker" }, [
+      element("span", { text: depth === 0 ? "Root family" : `Generation ${depth}` }),
+      element("small", { text: `${items.families.length + items.singles.length} family ${items.families.length + items.singles.length === 1 ? "group" : "groups"}` })
+    ]));
+    const groups = element("div", { className: "full-tree-groups" });
+    items.families.forEach((family) => {
+      const context = family.rootUnion ? "Root union" : `Family in generation ${depth}`;
+      const familyCard = element("article", { className: `full-tree-family${family.rootUnion ? " is-root" : ""}` });
+      familyCard.dataset.familyId = family.id;
+      familyCard.append(element("p", { className: "family-card-label", text: family.rootUnion ? "Root union" : "Family union" }));
+      const couple = element("div", { className: "full-tree-couple" });
+      family.partnerIds.slice(0, 2).forEach((id) => {
+        const person = graph.byId.get(id) || { person_id: id };
+        const card = fullTreePersonCard(person, context, (appearances.get(id) || 0) > 1);
+        rememberPersonCard(id, card);
+        couple.append(card);
+      });
+      if (family.partnerIds.length < 2) couple.append(element("div", { className: "missing-partner", text: "Partner not recorded" }));
+      family.partnerIds.slice(2).forEach((id) => {
+        const person = graph.byId.get(id) || { person_id: id };
+        const card = fullTreePersonCard(person, context, true);
+        rememberPersonCard(id, card);
+        couple.append(card);
+      });
+      familyCard.append(couple);
+      const childSummary = family.raw.children_truncated
+        ? "Further generations not shown"
+        : family.childIds.length
+          ? `${family.childIds.length} recorded ${family.childIds.length === 1 ? "child" : "children"}`
+          : "No recorded children";
+      familyCard.append(element("div", { className: "family-child-port" }, [
+        element("span", { text: childSummary })
+      ]));
+      familyElements.push({ family, element: familyCard });
+      groups.append(familyCard);
+    });
+    items.singles.forEach((id) => {
+      const person = graph.byId.get(id) || { person_id: id };
+      const single = element("article", { className: "full-tree-single" }, [
+        element("p", { className: "family-card-label", text: graph.roots.includes(id) ? "Root person" : "No union recorded" })
+      ]);
+      const card = fullTreePersonCard(person, `Unmarried or no union recorded in generation ${depth}`, false);
+      rememberPersonCard(id, card);
+      single.append(card);
+      groups.append(single);
+    });
+    lane.append(groups);
+    map.append(lane);
+  });
+  surface.append(map);
+  elements.fullTree.replaceChildren(surface);
+  state.fullTreeMap = map;
+  state.fullTreeSurface = surface;
+  state.fullTreeFamilies = familyElements;
+  state.fullTreePersonCards = personCards;
+  state.fullTreeScale = 1;
+  updateFullTreeZoom(false);
+
+  const peopleCount = Number(firstValue(graph.counts, ["people", "person_count", "individuals"])) || graph.byId.size;
+  const familyCount = Number(firstValue(graph.counts, ["families", "family_count", "marriages", "unions"])) || graph.families.length;
+  const generationCount = Number(firstValue(graph.counts, ["generations", "generation_count"])) || Math.max(...depths) + 1;
+  elements.fullTreeSummary.replaceChildren(
+    element("strong", { text: `${peopleCount} people` }),
+    element("span", { text: `${familyCount} family groups · ${generationCount} generations` })
+  );
+  const warnings = [];
+  if (graph.missingRootIds.length) warnings.push("One or both root records are missing.");
+  if (!graph.rootFamily) warnings.push(graph.message || "The root union was not returned; available people are shown individually.");
+  if (graph.truncated) warnings.push("The archive reports additional generations beyond the returned limit.");
+  setMessage(
+    elements.fullTreeState,
+    warnings.join(" ") || "Select a person to open their full record. Scroll, use arrow keys, or drag the blank canvas to explore.",
+    warnings.length ? "error" : ""
+  );
+  window.requestAnimationFrame(() => {
+    drawFullTreeConnectors();
+    centerFullTree();
+  });
+}
+
+function fullTreeOffset(node, map) {
+  let x = 0;
+  let y = 0;
+  let current = node;
+  while (current && current !== map) {
+    x += current.offsetLeft;
+    y += current.offsetTop;
+    current = current.offsetParent;
+  }
+  return { x, y };
+}
+
+function drawFullTreeConnectors() {
+  const map = state.fullTreeMap;
+  if (!map) return;
+  const svg = map.querySelector(".full-tree-lines");
+  svg.replaceChildren();
+  svg.setAttribute("viewBox", `0 0 ${map.offsetWidth} ${map.offsetHeight}`);
+  svg.setAttribute("width", String(map.offsetWidth));
+  svg.setAttribute("height", String(map.offsetHeight));
+  state.fullTreeFamilies.forEach(({ family, element: familyElement }) => {
+    if (!family.childIds.length) return;
+    const start = fullTreeOffset(familyElement.querySelector(".family-child-port"), map);
+    const startX = start.x + familyElement.querySelector(".family-child-port").offsetWidth / 2;
+    const startY = start.y + familyElement.querySelector(".family-child-port").offsetHeight;
+    family.childIds.forEach((childId) => {
+      const candidates = state.fullTreePersonCards.get(childId) || [];
+      const child = candidates.find((card) => {
+        const cardPosition = fullTreeOffset(card, map);
+        return cardPosition.y > startY;
+      }) || candidates[0];
+      if (!child) return;
+      const end = fullTreeOffset(child, map);
+      const endX = end.x + child.offsetWidth / 2;
+      const endY = end.y;
+      const middleY = startY + Math.max(24, (endY - startY) / 2);
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.setAttribute("d", `M ${startX} ${startY} V ${middleY} H ${endX} V ${endY}`);
+      svg.append(path);
+    });
+  });
+}
+
+function updateFullTreeZoom(keepCenter = true) {
+  if (!state.fullTreeMap || !state.fullTreeSurface) return;
+  const viewport = elements.fullTree;
+  const oldWidth = state.fullTreeSurface.offsetWidth || 1;
+  const oldHeight = state.fullTreeSurface.offsetHeight || 1;
+  const centerX = (viewport.scrollLeft + viewport.clientWidth / 2) / oldWidth;
+  const centerY = (viewport.scrollTop + viewport.clientHeight / 2) / oldHeight;
+  state.fullTreeMap.style.transform = `scale(${state.fullTreeScale})`;
+  state.fullTreeSurface.style.width = `${state.fullTreeMap.offsetWidth * state.fullTreeScale}px`;
+  state.fullTreeSurface.style.height = `${state.fullTreeMap.offsetHeight * state.fullTreeScale}px`;
+  elements.fullTreeZoomLevel.value = `${Math.round(state.fullTreeScale * 100)}%`;
+  elements.fullTreeZoomLevel.textContent = `${Math.round(state.fullTreeScale * 100)}%`;
+  elements.fullTreeZoomOut.disabled = state.fullTreeScale <= 0.4;
+  elements.fullTreeZoomIn.disabled = state.fullTreeScale >= 1.4;
+  if (keepCenter) {
+    viewport.scrollLeft = centerX * state.fullTreeSurface.offsetWidth - viewport.clientWidth / 2;
+    viewport.scrollTop = centerY * state.fullTreeSurface.offsetHeight - viewport.clientHeight / 2;
+  }
+}
+
+function changeFullTreeZoom(amount) {
+  state.fullTreeScale = Math.max(0.4, Math.min(1.4, Math.round((state.fullTreeScale + amount) * 10) / 10));
+  updateFullTreeZoom();
+}
+
+function centerFullTree() {
+  const root = state.fullTreeMap?.querySelector(".full-tree-family.is-root") || state.fullTreeMap?.querySelector(".full-tree-generation");
+  if (!root || !state.fullTreeSurface) return;
+  const position = fullTreeOffset(root, state.fullTreeMap);
+  elements.fullTree.scrollLeft = (position.x + root.offsetWidth / 2) * state.fullTreeScale - elements.fullTree.clientWidth / 2;
+  elements.fullTree.scrollTop = Math.max(0, position.y * state.fullTreeScale - 32);
+}
+
+function resetFullTreeView() {
+  state.fullTreeScale = 1;
+  updateFullTreeZoom(false);
+  centerFullTree();
+}
+
+async function loadFullTree() {
+  const loadKey = `${state.sourceVersion}:${state.transport}`;
+  if (state.fullTreeLoadKey === loadKey && state.fullTreeMap) return;
+  state.fullTreeController?.abort();
+  state.fullTreeController = new AbortController();
+  const controller = state.fullTreeController;
+  state.fullTreeLoadKey = loadKey;
+  state.fullTreeMap = null;
+  state.fullTreeSurface = null;
+  elements.fullTree.replaceChildren();
+  elements.fullTreeSummary.replaceChildren();
+  setMessage(elements.fullTreeState, "Opening all recorded generations...");
+  try {
+    const payload = await api(FULL_TREE_PATH, controller);
+    if (controller.signal.aborted || parseRoute().kind !== "full-tree") return;
+    renderFullTree(payload);
+  } catch (error) {
+    if (controller.signal.aborted) return;
+    state.fullTreeLoadKey = "";
+    const message = errorMessage(error);
+    if (message) setMessage(elements.fullTreeState, `Full tree could not be loaded: ${message}`, "error");
+  }
+}
+
 elements.databaseFile.addEventListener("change", async () => {
   const file = elements.databaseFile.files?.[0];
   await openSelectedFile(file);
@@ -1222,6 +1692,8 @@ elements.databaseFile.addEventListener("change", async () => {
 });
 elements.dataset.addEventListener("change", () => {
   writeRoute({ kind: "root" });
+  state.lastPeopleRoute = { kind: "root" };
+  showTopLevelView("people");
   resetForDataset();
   loadBrowsePage(0);
 });
@@ -1265,6 +1737,32 @@ elements.treeForm.addEventListener("submit", (event) => {
 elements.treeZoomOut.addEventListener("click", () => changeTreeZoom(-0.1));
 elements.treeZoomIn.addEventListener("click", () => changeTreeZoom(0.1));
 elements.treeZoomReset.addEventListener("click", resetTreeView);
+elements.fullTreeZoomOut.addEventListener("click", () => changeFullTreeZoom(-0.1));
+elements.fullTreeZoomIn.addEventListener("click", () => changeFullTreeZoom(0.1));
+elements.fullTreeZoomReset.addEventListener("click", resetFullTreeView);
+
+function selectTopLevelTab(view) {
+  const route = view === "full-tree" ? { kind: "full-tree" } : state.lastPeopleRoute;
+  if (parseRoute().kind === route.kind) return;
+  writeRoute(route);
+  applyRoute();
+}
+
+elements.peopleTab.addEventListener("click", () => selectTopLevelTab("people"));
+elements.fullTreeTab.addEventListener("click", () => selectTopLevelTab("full-tree"));
+[elements.peopleTab, elements.fullTreeTab].forEach((tab, index, tabs) => {
+  tab.addEventListener("keydown", (event) => {
+    let next = null;
+    if (event.key === "ArrowRight" || event.key === "ArrowDown") next = (index + 1) % tabs.length;
+    if (event.key === "ArrowLeft" || event.key === "ArrowUp") next = (index - 1 + tabs.length) % tabs.length;
+    if (event.key === "Home") next = 0;
+    if (event.key === "End") next = tabs.length - 1;
+    if (next === null) return;
+    event.preventDefault();
+    tabs[next].focus();
+    tabs[next].click();
+  });
+});
 
 let pan = null;
 elements.tree.addEventListener("pointerdown", (event) => {
@@ -1292,6 +1790,44 @@ function endTreePan(event) {
 elements.tree.addEventListener("pointerup", endTreePan);
 elements.tree.addEventListener("pointercancel", endTreePan);
 
+let fullTreePan = null;
+elements.fullTree.addEventListener("pointerdown", (event) => {
+  if (event.button !== 0 || event.target.closest("button")) return;
+  fullTreePan = {
+    pointerId: event.pointerId,
+    x: event.clientX,
+    y: event.clientY,
+    left: elements.fullTree.scrollLeft,
+    top: elements.fullTree.scrollTop
+  };
+  elements.fullTree.setPointerCapture(event.pointerId);
+  elements.fullTree.classList.add("is-panning");
+});
+elements.fullTree.addEventListener("pointermove", (event) => {
+  if (!fullTreePan || fullTreePan.pointerId !== event.pointerId) return;
+  elements.fullTree.scrollLeft = fullTreePan.left - (event.clientX - fullTreePan.x);
+  elements.fullTree.scrollTop = fullTreePan.top - (event.clientY - fullTreePan.y);
+});
+function endFullTreePan(event) {
+  if (!fullTreePan || fullTreePan.pointerId !== event.pointerId) return;
+  fullTreePan = null;
+  elements.fullTree.classList.remove("is-panning");
+}
+elements.fullTree.addEventListener("pointerup", endFullTreePan);
+elements.fullTree.addEventListener("pointercancel", endFullTreePan);
+elements.fullTree.addEventListener("keydown", (event) => {
+  const distance = event.shiftKey ? 220 : 70;
+  const movement = {
+    ArrowLeft: [-distance, 0],
+    ArrowRight: [distance, 0],
+    ArrowUp: [0, -distance],
+    ArrowDown: [0, distance]
+  }[event.key];
+  if (!movement || event.target.closest("button")) return;
+  event.preventDefault();
+  elements.fullTree.scrollBy({ left: movement[0], top: movement[1], behavior: "smooth" });
+});
+
 let routeSyncQueued = false;
 function queueRouteSync() {
   if (routeSyncQueued) return;
@@ -1303,7 +1839,10 @@ function queueRouteSync() {
 }
 window.addEventListener("popstate", queueRouteSync);
 window.addEventListener("hashchange", queueRouteSync);
-window.addEventListener("resize", () => window.requestAnimationFrame(drawTreeConnectors));
+window.addEventListener("resize", () => window.requestAnimationFrame(() => {
+  drawTreeConnectors();
+  drawFullTreeConnectors();
+}));
 
 if (window.matchMedia("(max-width: 560px)").matches) elements.generations.value = "2";
 
