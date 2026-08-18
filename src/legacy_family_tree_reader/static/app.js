@@ -72,11 +72,8 @@ const state = {
 };
 
 const BROWSE_PAGE_SIZE = 100;
-const STATIC_DB_FORMAT = "legacy-family-tree-reader-chunks";
-const STATIC_DB_VERSION = 1;
-const STATIC_DB_NAME = "family-tree.sqlite";
-const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 const ROUTE_ID_PATTERN = /^[^\u0000-\u001f\u007f]{1,256}$/;
+let standaloneLoader = null;
 
 function element(tag, options = {}, children = []) {
   const node = document.createElement(tag);
@@ -356,7 +353,7 @@ async function fetchJson(path, controller) {
     data = await response.json();
     parsed = true;
   } catch {
-    // A static host may rewrite an unknown API route to its HTML entry page.
+    // A proxy error page may not contain JSON.
   }
   if (!response.ok) {
     const detail = firstValue(data, ["detail", "message", "error"]);
@@ -396,9 +393,8 @@ function errorMessage(error) {
 
 function setSourceMode(mode) {
   const labels = {
-    server: "Source: Local Python server",
-    direct: "Source: Direct SQLite file",
-    static: "Source: Verified static SQLite archive"
+    server: "Source: Archive server",
+    direct: "Source: Direct SQLite file"
   };
   elements.sourceMode.textContent = labels[mode] || "Source: Checking archive...";
 }
@@ -603,6 +599,30 @@ function cancelActiveRequests() {
   state.catalogBusy = false;
 }
 
+function loadScript(path) {
+  return new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = path;
+    script.addEventListener("load", resolve, { once: true });
+    script.addEventListener("error", () => reject(new Error(`Could not load ${path}.`)), { once: true });
+    document.head.append(script);
+  });
+}
+
+async function ensureStandaloneReader() {
+  if (window.LegacyStandalone) return;
+  if (!standaloneLoader) {
+    standaloneLoader = (async () => {
+      await loadScript("vendor/sql-asm.js");
+      await loadScript("standalone.js");
+      if (!window.LegacyStandalone) {
+        throw new Error("The in-browser SQLite reader could not be loaded.");
+      }
+    })();
+  }
+  await standaloneLoader;
+}
+
 async function activateStandalone(file, sourceKind, version, description) {
   let opened = false;
   elements.databaseFile.disabled = true;
@@ -610,7 +630,7 @@ async function activateStandalone(file, sourceKind, version, description) {
   updateCatalogControls();
   setMessage(elements.appStatus, description);
   try {
-    if (!window.LegacyStandalone) throw new Error("The in-browser SQLite reader could not be loaded.");
+    await ensureStandaloneReader();
     await window.LegacyStandalone.open(file);
     opened = true;
     if (version !== state.sourceVersion) return;
@@ -647,181 +667,12 @@ async function openSelectedFile(file) {
   );
 }
 
-function validateStaticManifest(manifest) {
-  if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) {
-    throw new Error("Invalid data manifest: expected a JSON object.");
-  }
-  if (manifest.format !== STATIC_DB_FORMAT || manifest.version !== STATIC_DB_VERSION) {
-    throw new Error(
-      `Unsupported data manifest: expected format "${STATIC_DB_FORMAT}" version ${STATIC_DB_VERSION}.`
-    );
-  }
-  if (manifest.database !== STATIC_DB_NAME) {
-    throw new Error(`Invalid data manifest: database must be "${STATIC_DB_NAME}".`);
-  }
-  if (!Number.isSafeInteger(manifest.size) || manifest.size <= 0 || !SHA256_PATTERN.test(manifest.sha256)) {
-    throw new Error("Invalid data manifest: database size or SHA-256 is invalid.");
-  }
-  if (!Number.isSafeInteger(manifest.chunk_size) || manifest.chunk_size <= 0 || manifest.chunk_size > 24 * 1024 * 1024) {
-    throw new Error("Invalid data manifest: chunk_size must be between 1 byte and 24 MiB.");
-  }
-  if (!Array.isArray(manifest.parts) || !manifest.parts.length) {
-    throw new Error("Invalid data manifest: no database parts are listed.");
-  }
-  const seenPaths = new Set();
-  let listedSize = 0;
-  manifest.parts.forEach((part, index) => {
-    const path = part?.path;
-    const validPath = typeof path === "string" && path.length <= 512 && !path.startsWith("/") &&
-      !path.includes("\\") && !path.includes("?") && !path.includes("#") &&
-      path.split("/").every((segment) => segment && segment !== "." && segment !== "..");
-    if (!validPath || path !== `${STATIC_DB_NAME}.part${String(index).padStart(3, "0")}` || seenPaths.has(path)) {
-      throw new Error(`Invalid data manifest: part ${index + 1} has an unsafe or duplicate path.`);
-    }
-    if (!Number.isSafeInteger(part.size) || part.size <= 0 || part.size > manifest.chunk_size || !SHA256_PATTERN.test(part.sha256)) {
-      throw new Error(`Invalid data manifest: part ${index + 1} has an invalid size or SHA-256.`);
-    }
-    if (index < manifest.parts.length - 1 && part.size !== manifest.chunk_size) {
-      throw new Error(`Invalid data manifest: part ${index + 1} does not match chunk_size.`);
-    }
-    seenPaths.add(path);
-    listedSize += part.size;
-  });
-  if (!Number.isSafeInteger(listedSize) || listedSize !== manifest.size) {
-    throw new Error("Invalid data manifest: part sizes do not equal the complete database size.");
-  }
-  return manifest;
-}
-
-function byteProgress(downloaded, total, partNumber, partCount) {
-  const megabytes = (downloaded / (1024 * 1024)).toFixed(1);
-  const totalMegabytes = (total / (1024 * 1024)).toFixed(1);
-  setMessage(
-    elements.appStatus,
-    `Loading database part ${partNumber} of ${partCount}: ${megabytes} of ${totalMegabytes} MB...`
-  );
-}
-
-async function sha256Hex(bytes) {
-  if (!window.crypto?.subtle) {
-    throw new Error("This browser cannot verify database SHA-256 hashes. Use HTTPS or a current browser.");
-  }
-  const digest = await window.crypto.subtle.digest("SHA-256", bytes);
-  return Array.from(new Uint8Array(digest), (value) => value.toString(16).padStart(2, "0")).join("");
-}
-
-async function readPart(response, part, progress) {
-  if (!response.body) {
-    const bytes = new Uint8Array(await response.arrayBuffer());
-    progress(bytes.byteLength);
-    return bytes;
-  }
-  const reader = response.body.getReader();
-  const chunks = [];
-  let length = 0;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-    length += value.byteLength;
-    progress(value.byteLength);
-    if (length > part.size) throw new Error(`Database part "${part.path}" is larger than its manifest size.`);
-  }
-  const bytes = new Uint8Array(length);
-  let offset = 0;
-  chunks.forEach((chunk) => {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  });
-  return bytes;
-}
-
-async function fetchStaticDatabase(controller) {
-  let response;
-  try {
-    response = await fetch("/data/manifest.json", {
-      credentials: "same-origin",
-      headers: { Accept: "application/json" },
-      cache: "no-cache",
-      signal: controller.signal
-    });
-  } catch (error) {
-    if (error?.name === "AbortError") throw error;
-    throw new Error(`Could not fetch /data/manifest.json: ${errorMessage(error)}`);
-  }
-  if (response.status === 401) redirectToLogin(response, "/data/manifest.json");
-  if (response.redirected && !response.headers.get("Content-Type")?.includes("application/json")) {
-    redirectToLogin(response, "/data/manifest.json");
-  }
-  if (response.status === 404) return null;
-  if (!response.ok) throw new Error(`Could not fetch /data/manifest.json (HTTP ${response.status}).`);
-  let manifest;
-  try {
-    manifest = validateStaticManifest(await response.json());
-  } catch (error) {
-    if (error instanceof SyntaxError) throw new Error("Invalid data manifest: /data/manifest.json is not valid JSON.");
-    throw error;
-  }
-
-  const partBytes = [];
-  let downloaded = 0;
-  for (let index = 0; index < manifest.parts.length; index += 1) {
-    const part = manifest.parts[index];
-    const partUrl = `/data/${part.path.split("/").map(encodeURIComponent).join("/")}`;
-    byteProgress(downloaded, manifest.size, index + 1, manifest.parts.length);
-    let partResponse;
-    try {
-      partResponse = await fetch(partUrl, { credentials: "same-origin", cache: "no-cache", signal: controller.signal });
-    } catch (error) {
-      if (error?.name === "AbortError") throw error;
-      throw new Error(`Could not fetch database part "${part.path}": ${errorMessage(error)}`);
-    }
-    if (partResponse.status === 401) redirectToLogin(partResponse, partUrl);
-    if (!partResponse.ok) {
-      const detail = partResponse.status === 404 ? "is missing" : `returned HTTP ${partResponse.status}`;
-      throw new Error(`Database part "${part.path}" ${detail}. Re-upload the complete data directory.`);
-    }
-    const bytes = await readPart(partResponse, part, (amount) => {
-      downloaded += amount;
-      byteProgress(downloaded, manifest.size, index + 1, manifest.parts.length);
-    });
-    if (bytes.byteLength !== part.size) {
-      throw new Error(`Database part "${part.path}" has ${bytes.byteLength} bytes; expected ${part.size}.`);
-    }
-    const digest = await sha256Hex(bytes);
-    if (digest !== part.sha256) {
-      throw new Error(`SHA-256 mismatch for database part "${part.path}". Re-upload that part and reload.`);
-    }
-    partBytes.push(bytes);
-  }
-
-  const complete = new Uint8Array(manifest.size);
-  let offset = 0;
-  partBytes.forEach((bytes) => {
-    complete.set(bytes, offset);
-    offset += bytes.byteLength;
-  });
-  setMessage(elements.appStatus, "Verifying the complete database SHA-256...");
-  const completeDigest = await sha256Hex(complete);
-  if (completeDigest !== manifest.sha256) {
-    throw new Error("Complete database SHA-256 mismatch. Check the manifest and all uploaded parts.");
-  }
-  return new Blob([complete], { type: "application/vnd.sqlite3" });
-}
-
 async function initializeHttp() {
   const version = ++state.sourceVersion;
   const controller = new AbortController();
   state.startupController = controller;
-  setMessage(elements.appStatus, "Looking for the static family archive...");
+  setMessage(elements.appStatus, "Connecting to the archive server...");
   try {
-    const databaseBlob = await fetchStaticDatabase(controller);
-    if (version !== state.sourceVersion) return;
-    if (databaseBlob) {
-      await activateStandalone(databaseBlob, "static", version, "Opening the verified database in this browser...");
-      return;
-    }
-    setMessage(elements.appStatus, "Static database not found; connecting to the local archive server...");
     const payload = await fetchJson("/api/datasets", controller);
     if (version !== state.sourceVersion) return;
     state.transport = "server";

@@ -1148,7 +1148,7 @@ def export_gedcom(
     lines = [
         "0 HEAD",
         "1 SOUR LegacyFamilyTreeReader",
-        "2 VERS 0.3.0",
+        "2 VERS 0.4.0",
         "2 NAME Legacy Family Tree Reader",
         "1 GEDC",
         "2 VERS 5.5.1",

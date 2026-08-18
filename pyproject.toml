@@ -1,6 +1,6 @@
 [project]
 name = "legacy-family-tree-reader"
-version = "0.3.0"
+version = "0.4.0"
 description = "Convert, merge, browse, query, and export Legacy Family Tree 9 databases"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -16,7 +16,9 @@ classifiers = [
   "Topic :: Sociology :: Genealogy",
 ]
 dependencies = [
+    "fastapi>=0.141.1",
     "openpyxl>=3.1.5",
+    "uvicorn>=0.52.3",
 ]
 
 [project.urls]
@@ -37,6 +39,7 @@ packages = ["src/legacy_family_tree_reader"]
 
 [dependency-groups]
 dev = [
+    "httpx2>=2.10.0",
     "pytest>=8.3.5",
     "ruff>=0.11.0",
 ]

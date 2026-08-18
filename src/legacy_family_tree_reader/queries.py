@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
-from collections import defaultdict, deque
+from collections import defaultdict
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from itertools import pairwise
@@ -759,31 +759,266 @@ def _id_map(rows: list[JsonObject], id_column: str) -> dict[JsonValue, JsonObjec
     return {row[id_column]: row for row in rows if row.get(id_column) is not None}
 
 
-def _family_data(
-    connection: sqlite3.Connection, dataset_id: Any
-) -> tuple[
-    dict[JsonValue, JsonObject],
-    list[JsonObject],
-    list[JsonObject],
-]:
-    people_table, _, _ = _person_source(connection)
-    people_rows = [
-        _normalize_person(row) for row in _dataset_rows(connection, people_table, dataset_id)
-    ]
-    people = _id_map(people_rows, "person_id")
-    marriages = _dataset_rows(connection, "marriages", dataset_id)
-    for marriage in marriages:
-        _add_alias(marriage, "husband_person_id", "husband_individual_id")
-        _add_alias(marriage, "wife_person_id", "wife_individual_id")
-    link_table = (
-        "parent_child_links" if _table_exists(connection, "parent_child_links") else "children"
+_IN_CHUNK_SIZE = 900
+
+
+def _value_order(value: JsonValue) -> tuple[int, float | str]:
+    if isinstance(value, (int, float)):
+        return (0, float(value))
+    if value is None:
+        return (2, "")
+    return (1, str(value))
+
+
+def _ordered_values(values: Sequence[JsonValue]) -> list[JsonValue]:
+    seen: set[JsonValue] = set()
+    result = []
+    for value in values:
+        if value is not None and value not in seen:
+            seen.add(value)
+            result.append(value)
+    return result
+
+
+def _rows_with_values(
+    connection: sqlite3.Connection,
+    table: str,
+    dataset_id: Any,
+    column: str,
+    values: Sequence[JsonValue],
+    *,
+    selected_columns: Sequence[str] | None = None,
+) -> list[JsonObject]:
+    values = _ordered_values(values)
+    if not values:
+        return []
+    selection = "*"
+    if selected_columns is not None:
+        selection = ", ".join(_quote_identifier(name) for name in selected_columns)
+    rows: list[JsonObject] = []
+    for offset in range(0, len(values), _IN_CHUNK_SIZE):
+        chunk = values[offset : offset + _IN_CHUNK_SIZE]
+        placeholders = ", ".join("?" for _ in chunk)
+        rows.extend(
+            _fetch_all(
+                connection,
+                f"SELECT {selection} FROM {_quote_identifier(table)} "
+                f"WHERE dataset_id = ? AND {_quote_identifier(column)} IN ({placeholders})",
+                (dataset_id, *chunk),
+            )
+        )
+    return rows
+
+
+def _compact_people(
+    connection: sqlite3.Connection, dataset_id: Any, person_ids: Sequence[JsonValue]
+) -> dict[JsonValue, JsonObject]:
+    table, columns, id_column = _person_source(connection)
+    if "dataset_id" not in columns or id_column is None:
+        return {}
+    candidates = (
+        "dataset_id",
+        id_column,
+        "legacy_rin",
+        "legacy_id",
+        "title_prefix",
+        "prefix",
+        "given_names",
+        "given_name",
+        "surname",
+        "title_suffix",
+        "title",
+        "gender_code",
+        "gender",
+        "birth_legacy_date",
+        "birth_date",
+        "birth_sort_date_key",
+        "birth_sort_date",
+        "death_legacy_date",
+        "death_date",
+        "death_sort_date_key",
+        "death_sort_date",
+        "living_flag",
+        "living",
+        "private_flag",
+        "private",
     )
-    links = _dataset_rows(connection, link_table, dataset_id)
-    for link in links:
-        _add_alias(link, "parent_marriage_id", "marriage_id")
-        _add_alias(link, "child_person_id", "individual_id", "child_individual_id")
-        _add_alias(link, "child_order", "display_order")
-    return people, marriages, links
+    selected = tuple(dict.fromkeys(column for column in candidates if column in columns))
+    rows = _rows_with_values(
+        connection,
+        table,
+        dataset_id,
+        id_column,
+        person_ids,
+        selected_columns=selected,
+    )
+    return _id_map([_normalize_person(row) for row in rows], "person_id")
+
+
+def _matching_person_id(
+    people: Mapping[JsonValue, JsonObject], requested_id: Any
+) -> JsonValue | None:
+    if requested_id in people:
+        return requested_id
+    return next((key for key in people if str(key) == str(requested_id)), None)
+
+
+def _normalize_marriage(marriage: JsonObject) -> JsonObject:
+    _add_alias(marriage, "husband_person_id", "husband_individual_id")
+    _add_alias(marriage, "wife_person_id", "wife_individual_id")
+    return marriage
+
+
+def _normalize_link(link: JsonObject) -> JsonObject:
+    _add_alias(link, "parent_marriage_id", "marriage_id")
+    _add_alias(link, "child_person_id", "individual_id", "child_individual_id")
+    _add_alias(link, "child_order", "display_order")
+    return link
+
+
+def _marriage_columns(connection: sqlite3.Connection) -> tuple[set[str], str | None, str | None]:
+    columns = set(_columns(connection, "marriages"))
+    return (
+        columns,
+        _first_column(columns, "husband_person_id", "husband_individual_id"),
+        _first_column(columns, "wife_person_id", "wife_individual_id"),
+    )
+
+
+def _marriage_order(marriage: JsonObject) -> tuple[int, float | str]:
+    return _value_order(marriage.get("marriage_id"))
+
+
+def _link_order(
+    link: JsonObject,
+) -> tuple[tuple[int, float | str], tuple[int, float | str], tuple[int, float | str]]:
+    link_id = next(
+        (
+            link.get(column)
+            for column in ("child_id", "parent_child_link_id", "link_id")
+            if link.get(column) is not None
+        ),
+        None,
+    )
+    return (
+        _value_order(link.get("parent_marriage_id")),
+        _value_order(link.get("child_order")),
+        _value_order(link_id if link_id is not None else link.get("child_person_id")),
+    )
+
+
+def _marriage_rows_by_ids(
+    connection: sqlite3.Connection,
+    dataset_id: Any,
+    marriage_ids: Sequence[JsonValue],
+    *,
+    full: bool = False,
+) -> list[JsonObject]:
+    columns, husband_column, wife_column = _marriage_columns(connection)
+    if "dataset_id" not in columns or "marriage_id" not in columns:
+        return []
+    selected = None
+    if not full:
+        selected = tuple(
+            column
+            for column in ("dataset_id", "marriage_id", husband_column, wife_column)
+            if column is not None
+        )
+    rows = _rows_with_values(
+        connection,
+        "marriages",
+        dataset_id,
+        "marriage_id",
+        marriage_ids,
+        selected_columns=selected,
+    )
+    rows = [_normalize_marriage(row) for row in rows]
+    rows.sort(key=_marriage_order)
+    return rows
+
+
+def _own_marriages(
+    connection: sqlite3.Connection,
+    dataset_id: Any,
+    person_ids: Sequence[JsonValue],
+    *,
+    full: bool = False,
+) -> list[JsonObject]:
+    columns, husband_column, wife_column = _marriage_columns(connection)
+    if "dataset_id" not in columns or husband_column is None or wife_column is None:
+        return []
+    selected = None
+    if not full:
+        selected = tuple(
+            column
+            for column in ("dataset_id", "marriage_id", husband_column, wife_column)
+            if column is not None
+        )
+    rows: list[JsonObject] = []
+    # Separate branches let SQLite use each spouse-column index.
+    for column in (husband_column, wife_column):
+        rows.extend(
+            _rows_with_values(
+                connection,
+                "marriages",
+                dataset_id,
+                column,
+                person_ids,
+                selected_columns=selected,
+            )
+        )
+    unique: dict[tuple[JsonValue, JsonValue, JsonValue], JsonObject] = {}
+    for row in rows:
+        marriage = _normalize_marriage(row)
+        key = (
+            marriage.get("marriage_id"),
+            marriage.get("husband_person_id"),
+            marriage.get("wife_person_id"),
+        )
+        unique.setdefault(key, marriage)
+    result = list(unique.values())
+    result.sort(key=_marriage_order)
+    return result
+
+
+def _link_source(connection: sqlite3.Connection) -> tuple[str, set[str], str | None, str | None]:
+    table = "parent_child_links" if _table_exists(connection, "parent_child_links") else "children"
+    columns = set(_columns(connection, table))
+    return (
+        table,
+        columns,
+        _first_column(columns, "parent_marriage_id", "marriage_id"),
+        _first_column(columns, "child_person_id", "individual_id", "child_individual_id"),
+    )
+
+
+def _links_by_column(
+    connection: sqlite3.Connection,
+    dataset_id: Any,
+    column: str | None,
+    values: Sequence[JsonValue],
+) -> list[JsonObject]:
+    table, columns, _, _ = _link_source(connection)
+    if "dataset_id" not in columns or column is None:
+        return []
+    rows = _rows_with_values(connection, table, dataset_id, column, values)
+    rows = [_normalize_link(row) for row in rows]
+    rows.sort(key=_link_order)
+    return rows
+
+
+def _parent_links(
+    connection: sqlite3.Connection, dataset_id: Any, person_ids: Sequence[JsonValue]
+) -> list[JsonObject]:
+    _, _, _, child_column = _link_source(connection)
+    return _links_by_column(connection, dataset_id, child_column, person_ids)
+
+
+def _marriage_links(
+    connection: sqlite3.Connection, dataset_id: Any, marriage_ids: Sequence[JsonValue]
+) -> list[JsonObject]:
+    _, _, marriage_column, _ = _link_source(connection)
+    return _links_by_column(connection, dataset_id, marriage_column, marriage_ids)
 
 
 def _with_relationship(
@@ -813,22 +1048,30 @@ def get_family(source: DatabaseSource, dataset_id: Any, person_id: Any) -> JsonO
     """Return parents, spouses, children, and siblings for one person."""
 
     with _connection(source) as connection:
-        people, marriages, links = _family_data(connection, dataset_id)
-        person = people.get(person_id)
-        if person is None:
-            # URL values are strings while SQLite identifiers are often integers.
-            person = next((row for key, row in people.items() if str(key) == str(person_id)), None)
-        if person is None:
+        people = _compact_people(connection, dataset_id, [person_id])
+        actual_id = _matching_person_id(people, person_id)
+        if actual_id is None:
             return None
-        actual_id = person.get("person_id")
-        marriage_by_id = _id_map(marriages, "marriage_id")
-        own_marriages = [
-            marriage
-            for marriage in marriages
-            if actual_id in (marriage.get("husband_person_id"), marriage.get("wife_person_id"))
-        ]
-        parent_links = [link for link in links if link.get("child_person_id") == actual_id]
-        parent_marriage_ids = {link.get("parent_marriage_id") for link in parent_links}
+        person = people[actual_id]
+        own_marriages = _own_marriages(connection, dataset_id, [actual_id], full=True)
+        parent_links = _parent_links(connection, dataset_id, [actual_id])
+        parent_marriage_ids = _ordered_values(
+            [link.get("parent_marriage_id") for link in parent_links]
+        )
+        parent_marriages = _marriage_rows_by_ids(connection, dataset_id, parent_marriage_ids)
+        marriage_by_id = _id_map(parent_marriages, "marriage_id")
+        own_marriage_ids = _ordered_values(
+            [marriage.get("marriage_id") for marriage in own_marriages]
+        )
+        child_links = _marriage_links(connection, dataset_id, own_marriage_ids)
+        sibling_links = _marriage_links(connection, dataset_id, parent_marriage_ids)
+
+        related_ids: list[JsonValue] = []
+        for marriage in (*parent_marriages, *own_marriages):
+            related_ids.extend([marriage.get("husband_person_id"), marriage.get("wife_person_id")])
+        related_ids.extend(link.get("child_person_id") for link in child_links)
+        related_ids.extend(link.get("child_person_id") for link in sibling_links)
+        people.update(_compact_people(connection, dataset_id, related_ids))
 
         parents: list[JsonObject] = []
         for marriage_id in parent_marriage_ids:
@@ -844,7 +1087,6 @@ def get_family(source: DatabaseSource, dataset_id: Any, person_id: Any) -> JsonO
 
         spouses: list[JsonObject] = []
         children: list[JsonObject] = []
-        own_marriage_ids = {marriage.get("marriage_id") for marriage in own_marriages}
         for marriage in own_marriages:
             spouse_id = (
                 marriage.get("wife_person_id")
@@ -855,23 +1097,16 @@ def get_family(source: DatabaseSource, dataset_id: Any, person_id: Any) -> JsonO
                 spouses.append(
                     _with_relationship(people[spouse_id], "spouse", marriage.get("marriage_id"))
                 )
-        for link in links:
-            if link.get("parent_marriage_id") in own_marriage_ids:
-                child_id = link.get("child_person_id")
-                if child_id in people:
-                    children.append(
-                        _with_relationship(
-                            people[child_id], "child", link.get("parent_marriage_id")
-                        )
-                    )
+        for link in child_links:
+            child_id = link.get("child_person_id")
+            if child_id in people:
+                children.append(
+                    _with_relationship(people[child_id], "child", link.get("parent_marriage_id"))
+                )
 
         siblings: list[JsonObject] = []
-        for link in links:
-            if (
-                link.get("parent_marriage_id") in parent_marriage_ids
-                and link.get("child_person_id") != actual_id
-                and link.get("child_person_id") in people
-            ):
+        for link in sibling_links:
+            if link.get("child_person_id") != actual_id and link.get("child_person_id") in people:
                 siblings.append(
                     _with_relationship(
                         people[link["child_person_id"]],
@@ -890,43 +1125,69 @@ def get_family(source: DatabaseSource, dataset_id: Any, person_id: Any) -> JsonO
         }
 
 
-def _graph(
-    people: dict[JsonValue, JsonObject],
-    marriages: list[JsonObject],
-    links: list[JsonObject],
+def _frontier_edges(
+    connection: sqlite3.Connection,
+    dataset_id: Any,
+    frontier: Sequence[JsonValue],
     *,
-    include_spouses: bool,
+    relationships: set[str],
 ) -> dict[JsonValue, list[tuple[JsonValue, str, JsonValue | None]]]:
-    graph: defaultdict[JsonValue, list[tuple[JsonValue, str, JsonValue | None]]] = defaultdict(list)
-    marriage_by_id = _id_map(marriages, "marriage_id")
+    edges: defaultdict[JsonValue, list[tuple[JsonValue, str, JsonValue | None]]] = defaultdict(list)
+    frontier_set = set(frontier)
+    parent_links = (
+        _parent_links(connection, dataset_id, frontier) if "parent" in relationships else []
+    )
+    own_marriages = (
+        _own_marriages(connection, dataset_id, frontier)
+        if relationships & {"child", "spouse"}
+        else []
+    )
+    parent_marriage_ids = _ordered_values([link.get("parent_marriage_id") for link in parent_links])
+    child_links = (
+        _marriage_links(
+            connection,
+            dataset_id,
+            [marriage.get("marriage_id") for marriage in own_marriages],
+        )
+        if "child" in relationships
+        else []
+    )
+    parent_marriages = _marriage_rows_by_ids(connection, dataset_id, parent_marriage_ids)
+    marriage_by_id = _id_map([*parent_marriages, *own_marriages], "marriage_id")
+
+    links = [*parent_links, *child_links]
+    links.sort(key=_link_order)
     for link in links:
         marriage_id = link.get("parent_marriage_id")
         child_id = link.get("child_person_id")
         marriage = marriage_by_id.get(marriage_id)
-        if child_id not in people or not marriage:
+        if not marriage:
             continue
-        for parent_id in (
-            marriage.get("husband_person_id"),
-            marriage.get("wife_person_id"),
-        ):
-            if parent_id in people:
-                graph[child_id].append((parent_id, "parent", marriage_id))
-                graph[parent_id].append((child_id, "child", marriage_id))
-    if include_spouses:
-        for marriage in marriages:
+        if "parent" in relationships and child_id in frontier_set:
+            for parent_id in (
+                marriage.get("husband_person_id"),
+                marriage.get("wife_person_id"),
+            ):
+                if parent_id is not None:
+                    edges[child_id].append((parent_id, "parent", marriage_id))
+        if "child" in relationships:
+            for parent_id in (
+                marriage.get("husband_person_id"),
+                marriage.get("wife_person_id"),
+            ):
+                if parent_id in frontier_set and child_id is not None:
+                    edges[parent_id].append((child_id, "child", marriage_id))
+    if "spouse" in relationships:
+        for marriage in own_marriages:
             husband = marriage.get("husband_person_id")
             wife = marriage.get("wife_person_id")
             marriage_id = marriage.get("marriage_id")
-            if husband in people and wife in people and husband != wife:
-                graph[husband].append((wife, "spouse", marriage_id))
-                graph[wife].append((husband, "spouse", marriage_id))
-    return graph
-
-
-def _resolve_person_id(people: Mapping[JsonValue, JsonObject], person_id: Any) -> JsonValue | None:
-    if person_id in people:
-        return person_id
-    return next((key for key in people if str(key) == str(person_id)), None)
+            if husband != wife:
+                if husband in frontier_set and wife is not None:
+                    edges[husband].append((wife, "spouse", marriage_id))
+                if wife in frontier_set and husband is not None:
+                    edges[wife].append((husband, "spouse", marriage_id))
+    return edges
 
 
 def _specific_relationship(base: str, target: Mapping[str, JsonValue]) -> str:
@@ -958,41 +1219,51 @@ def get_tree(
     max_depth = max(0, min(int(max_depth), 100))
     wanted_edge = "parent" if direction == "ancestors" else "child"
     with _connection(source) as connection:
-        people, marriages, links = _family_data(connection, dataset_id)
-        root_id = _resolve_person_id(people, person_id)
+        people = _compact_people(connection, dataset_id, [person_id])
+        root_id = _matching_person_id(people, person_id)
         if root_id is None:
             return None
-        graph = _graph(people, marriages, links, include_spouses=False)
-        queue = deque([(root_id, 0)])
         visited = {root_id}
+        missing: set[JsonValue] = set()
+        frontier = [root_id]
         traversed: list[JsonObject] = []
         tree_links: list[JsonObject] = []
         generations: defaultdict[int, list[JsonObject]] = defaultdict(list)
-        while queue:
-            current, depth = queue.popleft()
-            if depth >= max_depth:
-                continue
-            for target, edge, marriage_id in graph.get(current, []):
-                if edge != wanted_edge:
-                    continue
-                relationship = _specific_relationship(edge, people[target])
-                tree_links.append(
-                    {
-                        "from_person_id": current,
-                        "to_person_id": target,
-                        "relationship": relationship,
-                        "marriage_id": marriage_id,
-                    }
-                )
-                if target in visited:
-                    continue
-                visited.add(target)
-                item = _person_reference(people[target])
-                item["depth"] = depth + 1
-                item["relationship"] = relationship
-                traversed.append(item)
-                generations[depth + 1].append(item)
-                queue.append((target, depth + 1))
+        for depth in range(max_depth):
+            if not frontier:
+                break
+            edges = _frontier_edges(connection, dataset_id, frontier, relationships={wanted_edge})
+            targets = [target for current in frontier for target, _, _ in edges.get(current, [])]
+            unfetched = [
+                target for target in targets if target not in people and target not in missing
+            ]
+            fetched = _compact_people(connection, dataset_id, unfetched)
+            people.update(fetched)
+            missing.update(set(unfetched) - set(fetched))
+            next_frontier: list[JsonValue] = []
+            for current in frontier:
+                for target, edge, marriage_id in edges.get(current, []):
+                    if target not in people:
+                        continue
+                    relationship = _specific_relationship(edge, people[target])
+                    tree_links.append(
+                        {
+                            "from_person_id": current,
+                            "to_person_id": target,
+                            "relationship": relationship,
+                            "marriage_id": marriage_id,
+                        }
+                    )
+                    if target in visited:
+                        continue
+                    visited.add(target)
+                    item = _person_reference(people[target])
+                    item["depth"] = depth + 1
+                    item["relationship"] = relationship
+                    traversed.append(item)
+                    generations[depth + 1].append(item)
+                    next_frontier.append(target)
+            frontier = next_frontier
         return {
             "root": _person_reference(people[root_id]),
             "direction": direction,
@@ -1026,9 +1297,9 @@ def shortest_relationship_path(
     """Find and explain the shortest parent/child/spouse path using BFS."""
 
     with _connection(source) as connection:
-        people, marriages, links = _family_data(connection, dataset_id)
-        start = _resolve_person_id(people, from_person_id)
-        goal = _resolve_person_id(people, to_person_id)
+        people = _compact_people(connection, dataset_id, [from_person_id, to_person_id])
+        start = _matching_person_id(people, from_person_id)
+        goal = _matching_person_id(people, to_person_id)
         if start is None or goal is None:
             missing = "from" if start is None else "to"
             return {"found": False, "reason": f"{missing} person was not found", "steps": []}
@@ -1041,20 +1312,37 @@ def shortest_relationship_path(
                 "explanation": "Both identifiers refer to the same person.",
             }
 
-        graph = _graph(people, marriages, links, include_spouses=True)
-        queue = deque([start])
         previous: dict[JsonValue, tuple[JsonValue, str, JsonValue | None]] = {}
         visited = {start}
-        while queue and goal not in visited:
-            current = queue.popleft()
-            for target, relationship, marriage_id in graph.get(current, []):
-                if target in visited:
-                    continue
-                visited.add(target)
-                previous[target] = (current, relationship, marriage_id)
-                queue.append(target)
-                if target == goal:
+        missing: set[JsonValue] = set()
+        frontier = [start]
+        while frontier and goal not in visited:
+            edges = _frontier_edges(
+                connection,
+                dataset_id,
+                frontier,
+                relationships={"parent", "child", "spouse"},
+            )
+            targets = [target for current in frontier for target, _, _ in edges.get(current, [])]
+            unfetched = [
+                target for target in targets if target not in people and target not in missing
+            ]
+            fetched = _compact_people(connection, dataset_id, unfetched)
+            people.update(fetched)
+            missing.update(set(unfetched) - set(fetched))
+            next_frontier: list[JsonValue] = []
+            for current in frontier:
+                for target, relationship, marriage_id in edges.get(current, []):
+                    if target in visited or target not in people:
+                        continue
+                    visited.add(target)
+                    previous[target] = (current, relationship, marriage_id)
+                    next_frontier.append(target)
+                    if target == goal:
+                        break
+                if goal in visited:
                     break
+            frontier = next_frontier
         if goal not in visited:
             return {
                 "found": False,

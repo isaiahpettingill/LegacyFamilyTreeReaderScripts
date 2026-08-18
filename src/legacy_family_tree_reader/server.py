@@ -1,20 +1,26 @@
-"""Local read-only HTTP browser for converted Legacy Family Tree databases."""
+"""Read-only FastAPI browser for converted Legacy Family Tree databases."""
 
 from __future__ import annotations
 
-import json
-import mimetypes
-import re
-import shutil
+import hashlib
+import hmac
+import html
+import os
 import sqlite3
 import threading
+import time
 import webbrowser
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from http import HTTPStatus
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from os import PathLike
 from pathlib import Path, PurePosixPath
 from typing import Any
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import parse_qs, urlencode, urlsplit
+
+import uvicorn
+from fastapi import FastAPI, Request
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, Response
 
 from .queries import (
     connect_read_only,
@@ -27,9 +33,50 @@ from .queries import (
     search_people,
     shortest_relationship_path,
 )
-from .site import ensure_chunk_cache
 
-_PERSON_ROUTE = re.compile(r"^/api/people/([^/]+)/([^/]+)(?:/(family|facts|tree))?$")
+_SESSION_COOKIE = "family_session"
+_SESSION_SECONDS = 12 * 60 * 60
+_PUBLIC_PATHS = frozenset({"/healthz", "/robots.txt", "/login", "/logout"})
+_SECURITY_HEADERS = {
+    "Content-Security-Policy": (
+        "default-src 'none'; script-src 'self' "
+        "'sha256-gejFXlVGkHnHkHvZFnQIzXSbpHGolD/d8fGODE3oV0o='; "
+        "style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; "
+        "font-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; "
+        "object-src 'none'"
+    ),
+    "Referrer-Policy": "no-referrer",
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "X-Robots-Tag": "noindex, nofollow, noarchive",
+}
+_LOGIN_PAGE = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow, noarchive">
+  <title>Family Archive Login</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 28rem; margin: 12vh auto; padding: 1rem; }
+    form { display: grid; gap: 1rem; }
+    input, button { box-sizing: border-box; font: inherit; padding: .75rem; width: 100%; }
+    .error { color: #8b1a1a; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Family Archive</h1>
+    {error}
+    <form action="/login" method="post">
+      <input name="next" type="hidden" value="{next_path}">
+      <label>Password <input name="password" type="password" required autofocus></label>
+      <button type="submit">Sign in</button>
+    </form>
+  </main>
+</body>
+</html>
+"""
 
 
 def _identifier(value: str) -> int | str:
@@ -37,6 +84,13 @@ def _identifier(value: str) -> int | str:
         return int(value)
     except ValueError:
         return value
+
+
+def _parameters(request: Request) -> dict[str, list[str]]:
+    parameters: dict[str, list[str]] = {}
+    for name, value in request.query_params.multi_items():
+        parameters.setdefault(name, []).append(value)
+    return parameters
 
 
 def _first(parameters: dict[str, list[str]], *names: str) -> str | None:
@@ -47,227 +101,334 @@ def _first(parameters: dict[str, list[str]], *names: str) -> str | None:
     return None
 
 
-def _handler(
-    database_path: Path, static_root: Path, data_root: Path | None = None
-) -> type[BaseHTTPRequestHandler]:
-    static_root = static_root.resolve()
-    data_root = data_root.resolve() if data_root is not None else None
+def _json(payload: Any, status: HTTPStatus = HTTPStatus.OK) -> JSONResponse:
+    return JSONResponse(
+        payload,
+        status_code=int(status),
+        headers={"Cache-Control": "no-store"},
+    )
 
-    class RequestHandler(BaseHTTPRequestHandler):
-        server_version = "LegacyFamilyTreeReader/0.3"
 
-        def do_GET(self) -> None:
-            self._dispatch()
+def _api_call(callback: Callable[[], Any], *, missing_person: bool = False) -> JSONResponse:
+    try:
+        payload = callback()
+        if missing_person and payload is None:
+            return _json({"error": "Person not found"}, HTTPStatus.NOT_FOUND)
+        return _json(payload)
+    except (ValueError, TypeError) as error:
+        return _json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
+    except (OSError, sqlite3.Error) as error:
+        return _json(
+            {"error": "Database query failed", "detail": str(error)},
+            HTTPStatus.INTERNAL_SERVER_ERROR,
+        )
 
-        def do_HEAD(self) -> None:
-            self._dispatch()
 
-        def _dispatch(self) -> None:
-            parsed = urlsplit(self.path)
-            if parsed.path.startswith("/api/"):
-                self._serve_api(parsed.path, parse_qs(parsed.query, keep_blank_values=True))
-            elif parsed.path.startswith("/data/") and data_root is not None:
-                self._serve_data(parsed.path)
-            else:
-                self._serve_static(parsed.path)
+def _session_token(secret: str) -> str:
+    expires = str(int(time.time()) + _SESSION_SECONDS)
+    signature = hmac.new(secret.encode(), expires.encode(), hashlib.sha256).hexdigest()
+    return f"{expires}.{signature}"
 
-        def _serve_api(self, path: str, parameters: dict[str, list[str]]) -> None:
-            try:
-                if path == "/api/datasets":
-                    self._send_json(list_datasets(database_path))
-                    return
-                if path == "/api/people/search":
-                    dataset = _first(parameters, "dataset", "dataset_id")
-                    query = _first(parameters, "q", "query")
-                    if dataset is None or query is None:
-                        self._bad_request("dataset and q query parameters are required")
-                        return
-                    limit_text = _first(parameters, "limit") or "50"
-                    self._send_json(
-                        search_people(
-                            database_path,
-                            _identifier(dataset),
-                            query,
-                            limit=int(limit_text),
-                        )
+
+def _valid_session(token: str | None, secret: str) -> bool:
+    if not token:
+        return False
+    try:
+        expires_text, signature = token.split(".", 1)
+        expires = int(expires_text)
+    except (TypeError, ValueError):
+        return False
+    expected = hmac.new(secret.encode(), expires_text.encode(), hashlib.sha256).hexdigest()
+    return hmac.compare_digest(signature, expected) and int(time.time()) <= expires
+
+
+def _password_matches(candidate: str, expected: str) -> bool:
+    candidate_digest = hashlib.sha256(candidate.encode()).digest()
+    expected_digest = hashlib.sha256(expected.encode()).digest()
+    return hmac.compare_digest(candidate_digest, expected_digest)
+
+
+def _safe_next(value: str | None) -> str:
+    if (
+        not value
+        or not value.startswith("/")
+        or value.startswith("//")
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        return "/"
+    parsed = urlsplit(value)
+    if parsed.scheme or parsed.netloc or parsed.path in {"/login", "/logout"}:
+        return "/"
+    return parsed.path + (f"?{parsed.query}" if parsed.query else "")
+
+
+def _login_page(*, invalid: bool = False, next_path: str = "/") -> HTMLResponse:
+    error = '<p class="error" role="alert">Invalid password.</p>' if invalid else ""
+    content = _LOGIN_PAGE.replace("{error}", error).replace(
+        "{next_path}", html.escape(_safe_next(next_path), quote=True)
+    )
+    return HTMLResponse(
+        content,
+        status_code=HTTPStatus.UNAUTHORIZED if invalid else HTTPStatus.OK,
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+def create_app(
+    database_path: str | PathLike[str],
+    password: str | None = None,
+    session_secret: str | None = None,
+    secure_cookie: bool = False,
+) -> FastAPI:
+    """Create a read-only API and packaged browser application."""
+
+    path = Path(database_path).expanduser().resolve()
+    static_root = Path(__file__).with_name("static").resolve()
+    if password is not None and not session_secret:
+        raise ValueError("session_secret is required when password is configured")
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        connection = connect_read_only(path)
+        try:
+            connection.execute("SELECT name FROM sqlite_master LIMIT 1").fetchone()
+        finally:
+            connection.close()
+        yield
+
+    app = FastAPI(
+        title="Legacy Family Tree Reader",
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+        lifespan=lifespan,
+    )
+
+    @app.middleware("http")
+    async def security_and_authentication(request: Request, call_next: Callable[..., Any]) -> Any:
+        if password is not None and request.url.path not in _PUBLIC_PATHS:
+            assert session_secret is not None
+            if not _valid_session(request.cookies.get(_SESSION_COOKIE), session_secret):
+                if request.url.path.startswith("/api/"):
+                    response = _json({"error": "Authentication required"}, HTTPStatus.UNAUTHORIZED)
+                else:
+                    destination = request.url.path
+                    if request.url.query:
+                        destination += f"?{request.url.query}"
+                    response = HTMLResponse(
+                        status_code=HTTPStatus.SEE_OTHER,
+                        headers={
+                            "Location": f"/login?{urlencode({'next': destination})}",
+                            "Cache-Control": "no-store",
+                        },
                     )
-                    return
-                if path == "/api/people":
-                    dataset = _first(parameters, "dataset", "dataset_id")
-                    if dataset is None:
-                        self._bad_request("dataset query parameter is required")
-                        return
-                    limit = int(_first(parameters, "limit") or "100")
-                    offset = int(_first(parameters, "offset") or "0")
-                    self._send_json(
-                        list_people(
-                            database_path,
-                            _identifier(dataset),
-                            limit=limit,
-                            offset=offset,
-                        )
-                    )
-                    return
-                if path == "/api/relationship":
-                    dataset = _first(parameters, "dataset", "dataset_id")
-                    source = _first(
-                        parameters,
-                        "from",
-                        "from_id",
-                        "from_person_id",
-                        "person1",
-                        "person_a",
-                    )
-                    target = _first(
-                        parameters,
-                        "to",
-                        "to_id",
-                        "to_person_id",
-                        "person2",
-                        "person_b",
-                    )
-                    if dataset is None or source is None or target is None:
-                        self._bad_request("dataset, from, and to query parameters are required")
-                        return
-                    self._send_json(
-                        shortest_relationship_path(
-                            database_path,
-                            _identifier(dataset),
-                            _identifier(source),
-                            _identifier(target),
-                        )
-                    )
-                    return
+                for name, value in _SECURITY_HEADERS.items():
+                    response.headers[name] = value
+                return response
+        response = await call_next(request)
+        for name, value in _SECURITY_HEADERS.items():
+            response.headers[name] = value
+        return response
 
-                match = _PERSON_ROUTE.fullmatch(path)
-                if not match:
-                    self._send_json({"error": "API endpoint not found"}, HTTPStatus.NOT_FOUND)
-                    return
-                dataset_text, person_text, action = (
-                    unquote(value) if value else value for value in match.groups()
+    @app.get("/healthz", include_in_schema=False)
+    def healthz() -> JSONResponse:
+        return _json({"status": "ok"})
+
+    @app.get("/robots.txt", include_in_schema=False)
+    def robots() -> PlainTextResponse:
+        return PlainTextResponse(
+            "User-agent: *\nDisallow: /\n", headers={"Cache-Control": "no-store"}
+        )
+
+    @app.get("/login", include_in_schema=False)
+    def login_form(request: Request) -> HTMLResponse:
+        if (
+            password is not None
+            and session_secret is not None
+            and _valid_session(request.cookies.get(_SESSION_COOKIE), session_secret)
+        ):
+            return HTMLResponse(status_code=HTTPStatus.SEE_OTHER, headers={"Location": "/"})
+        return _login_page(next_path=request.query_params.get("next", "/"))
+
+    @app.post("/login", include_in_schema=False)
+    async def login(request: Request) -> HTMLResponse:
+        if password is None:
+            return HTMLResponse(status_code=HTTPStatus.SEE_OTHER, headers={"Location": "/"})
+        body = await request.body()
+        form = parse_qs(body.decode("utf-8", errors="replace"), keep_blank_values=True)
+        supplied = form.get("password", [""])[0]
+        next_path = form.get("next", ["/"])[0]
+        if not _password_matches(supplied, password):
+            return _login_page(invalid=True, next_path=next_path)
+        assert session_secret is not None
+        response = HTMLResponse(
+            status_code=HTTPStatus.SEE_OTHER,
+            headers={"Location": _safe_next(next_path)},
+        )
+        response.set_cookie(
+            _SESSION_COOKIE,
+            _session_token(session_secret),
+            max_age=_SESSION_SECONDS,
+            httponly=True,
+            secure=secure_cookie,
+            samesite="strict",
+            path="/",
+        )
+        return response
+
+    @app.post("/logout", include_in_schema=False)
+    def logout() -> HTMLResponse:
+        response = HTMLResponse(
+            status_code=HTTPStatus.SEE_OTHER,
+            headers={"Location": "/login", "Cache-Control": "no-store"},
+        )
+        response.delete_cookie(
+            _SESSION_COOKIE,
+            path="/",
+            httponly=True,
+            secure=secure_cookie,
+            samesite="strict",
+        )
+        return response
+
+    @app.api_route("/api/datasets", methods=["GET", "HEAD"])
+    def datasets() -> JSONResponse:
+        return _api_call(lambda: list_datasets(path))
+
+    @app.api_route("/api/people/search", methods=["GET", "HEAD"])
+    def people_search(request: Request) -> JSONResponse:
+        parameters = _parameters(request)
+        dataset = _first(parameters, "dataset", "dataset_id")
+        query = _first(parameters, "q", "query")
+        if dataset is None or query is None:
+            return _json(
+                {"error": "dataset and q query parameters are required"},
+                HTTPStatus.BAD_REQUEST,
+            )
+        return _api_call(
+            lambda: search_people(
+                path,
+                _identifier(dataset),
+                query,
+                limit=int(_first(parameters, "limit") or "50"),
+            )
+        )
+
+    @app.api_route("/api/people", methods=["GET", "HEAD"])
+    def people(request: Request) -> JSONResponse:
+        parameters = _parameters(request)
+        dataset = _first(parameters, "dataset", "dataset_id")
+        if dataset is None:
+            return _json({"error": "dataset query parameter is required"}, HTTPStatus.BAD_REQUEST)
+        return _api_call(
+            lambda: list_people(
+                path,
+                _identifier(dataset),
+                limit=int(_first(parameters, "limit") or "100"),
+                offset=int(_first(parameters, "offset") or "0"),
+            )
+        )
+
+    @app.api_route("/api/relationship", methods=["GET", "HEAD"])
+    def relationship(request: Request) -> JSONResponse:
+        parameters = _parameters(request)
+        dataset = _first(parameters, "dataset", "dataset_id")
+        source = _first(parameters, "from", "from_id", "from_person_id", "person1", "person_a")
+        target = _first(parameters, "to", "to_id", "to_person_id", "person2", "person_b")
+        if dataset is None or source is None or target is None:
+            return _json(
+                {"error": "dataset, from, and to query parameters are required"},
+                HTTPStatus.BAD_REQUEST,
+            )
+        return _api_call(
+            lambda: shortest_relationship_path(
+                path, _identifier(dataset), _identifier(source), _identifier(target)
+            )
+        )
+
+    def person_response(
+        request: Request,
+        dataset_text: str,
+        person_text: str,
+        action: str | None,
+    ) -> JSONResponse:
+        if action not in {None, "family", "facts", "tree"}:
+            return _json({"error": "API endpoint not found"}, HTTPStatus.NOT_FOUND)
+        parameters = _parameters(request)
+        dataset_id = _identifier(dataset_text)
+        person_id = _identifier(person_text)
+
+        def query() -> Any:
+            if action == "family":
+                return get_family(path, dataset_id, person_id)
+            if action == "facts":
+                return get_person_facts(path, dataset_id, person_id)
+            if action == "tree":
+                return get_tree(
+                    path,
+                    dataset_id,
+                    person_id,
+                    direction=_first(parameters, "direction") or "ancestors",
+                    max_depth=int(_first(parameters, "max_depth", "generations") or "4"),
                 )
-                dataset_id = _identifier(dataset_text)
-                person_id = _identifier(person_text)
-                if action == "family":
-                    result = get_family(database_path, dataset_id, person_id)
-                elif action == "facts":
-                    result = get_person_facts(database_path, dataset_id, person_id)
-                elif action == "tree":
-                    direction = _first(parameters, "direction") or "ancestors"
-                    depth = int(_first(parameters, "max_depth", "generations") or "4")
-                    result = get_tree(
-                        database_path,
-                        dataset_id,
-                        person_id,
-                        direction=direction,
-                        max_depth=depth,
-                    )
-                else:
-                    result = get_person(database_path, dataset_id, person_id)
-                if result is None:
-                    self._send_json({"error": "Person not found"}, HTTPStatus.NOT_FOUND)
-                else:
-                    self._send_json(result)
-            except (ValueError, TypeError) as error:
-                self._bad_request(str(error))
-            except (OSError, sqlite3.Error) as error:
-                self._send_json(
-                    {"error": "Database query failed", "detail": str(error)},
-                    HTTPStatus.INTERNAL_SERVER_ERROR,
-                )
+            return get_person(path, dataset_id, person_id)
 
-        def _serve_static(self, request_path: str) -> None:
-            try:
-                decoded = unquote(request_path)
-                relative = PurePosixPath(decoded.lstrip("/"))
-                if (
-                    "\x00" in decoded
-                    or "\\" in decoded
-                    or any(part in {"", ".", ".."} for part in relative.parts)
-                ):
-                    raise ValueError
-                spa_fallback = bool(relative.parts) and not relative.suffix
-                if decoded.endswith("/") or not relative.parts:
-                    relative = relative / "index.html"
-                candidate = static_root.joinpath(*relative.parts).resolve()
-                candidate.relative_to(static_root)
-            except (OSError, ValueError):
-                self.send_error(HTTPStatus.NOT_FOUND)
-                return
-            if not candidate.is_file() and spa_fallback:
-                try:
-                    candidate = (static_root / "index.html").resolve()
-                    candidate.relative_to(static_root)
-                except (OSError, ValueError):
-                    self.send_error(HTTPStatus.NOT_FOUND)
-                    return
-            if not candidate.is_file():
-                self.send_error(HTTPStatus.NOT_FOUND)
-                return
-            content_type = mimetypes.guess_type(candidate.name)[0] or "application/octet-stream"
-            self._send_file(candidate, content_type)
+        return _api_call(query, missing_person=True)
 
-        def _serve_data(self, request_path: str) -> None:
-            assert data_root is not None
-            try:
-                decoded = unquote(request_path)
-                relative = PurePosixPath(decoded.lstrip("/"))
-                if len(relative.parts) != 2 or relative.parts[0] != "data":
-                    raise ValueError
-                name = relative.parts[1]
-                if name == "manifest.json":
-                    content_type = "application/json"
-                    cache_control = "no-store"
-                elif re.fullmatch(r"family-tree\.sqlite\.part\d{3,}", name):
-                    content_type = "application/octet-stream"
-                    cache_control = "public, max-age=31536000, immutable"
-                else:
-                    raise ValueError
-                candidate = (data_root / name).resolve()
-                candidate.relative_to(data_root)
-            except (OSError, ValueError):
-                self.send_error(HTTPStatus.NOT_FOUND)
-                return
-            if not candidate.is_file():
-                self.send_error(HTTPStatus.NOT_FOUND)
-                return
-            self._send_file(candidate, content_type, cache_control)
+    @app.api_route("/api/people/{dataset_text}/{person_text}", methods=["GET", "HEAD"])
+    def person(request: Request, dataset_text: str, person_text: str) -> JSONResponse:
+        return person_response(request, dataset_text, person_text, None)
 
-        def _send_file(
-            self, candidate: Path, content_type: str, cache_control: str | None = None
-        ) -> None:
-            try:
-                size = candidate.stat().st_size
-                source = candidate.open("rb")
-            except OSError:
-                self.send_error(HTTPStatus.NOT_FOUND)
-                return
-            with source:
-                self.send_response(HTTPStatus.OK)
-                self.send_header("Content-Type", content_type)
-                self.send_header("Content-Length", str(size))
-                if cache_control is not None:
-                    self.send_header("Cache-Control", cache_control)
-                self.send_header("X-Content-Type-Options", "nosniff")
-                self.end_headers()
-                if self.command != "HEAD":
-                    shutil.copyfileobj(source, self.wfile, length=1024 * 1024)
+    @app.api_route("/api/people/{dataset_text}/{person_text}/{action}", methods=["GET", "HEAD"])
+    def person_action(
+        request: Request, dataset_text: str, person_text: str, action: str
+    ) -> JSONResponse:
+        return person_response(request, dataset_text, person_text, action)
 
-        def _bad_request(self, message: str) -> None:
-            self._send_json({"error": message}, HTTPStatus.BAD_REQUEST)
+    @app.api_route("/api/{api_path:path}", methods=["GET", "HEAD"])
+    def unknown_api(api_path: str) -> JSONResponse:
+        del api_path
+        return _json({"error": "API endpoint not found"}, HTTPStatus.NOT_FOUND)
 
-        def _send_json(self, payload: Any, status: HTTPStatus = HTTPStatus.OK) -> None:
-            content = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(content)))
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("X-Content-Type-Options", "nosniff")
-            self.end_headers()
-            if self.command != "HEAD":
-                self.wfile.write(content)
+    def static_file(relative_path: str) -> FileResponse | JSONResponse:
+        try:
+            relative = PurePosixPath(relative_path)
+            if (
+                not relative.parts
+                or "\x00" in relative_path
+                or "\\" in relative_path
+                or any(part in {"", ".", ".."} for part in relative.parts)
+            ):
+                raise ValueError
+            candidate = static_root.joinpath(*relative.parts).resolve()
+            candidate.relative_to(static_root)
+        except (OSError, ValueError):
+            return _json({"detail": "Not Found"}, HTTPStatus.NOT_FOUND)
+        if not candidate.is_file():
+            return _json({"detail": "Not Found"}, HTTPStatus.NOT_FOUND)
+        return FileResponse(candidate)
 
-    return RequestHandler
+    @app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
+    def index() -> FileResponse:
+        return FileResponse(static_root / "index.html")
+
+    @app.api_route(
+        "/dataset/{dataset}/person/{person_id}", methods=["GET", "HEAD"], include_in_schema=False
+    )
+    def person_page(dataset: str, person_id: str) -> FileResponse:
+        del dataset, person_id
+        return FileResponse(static_root / "index.html")
+
+    @app.api_route("/data/{data_path:path}", methods=["GET", "HEAD"], include_in_schema=False)
+    def unavailable_data(data_path: str) -> JSONResponse:
+        del data_path
+        return _json({"detail": "Not Found"}, HTTPStatus.NOT_FOUND)
+
+    @app.api_route("/{asset_path:path}", methods=["GET", "HEAD"], include_in_schema=False)
+    def assets(asset_path: str) -> Response:
+        return static_file(asset_path)
+
+    return app
 
 
 def serve(
@@ -278,28 +439,22 @@ def serve(
 ) -> None:
     """Serve package static assets and JSON APIs until interrupted."""
 
-    path = Path(database_path).expanduser().resolve(strict=True)
-    connection = connect_read_only(path)
-    connection.close()
-    static_root = Path(__file__).with_name("static").resolve()
-    data_root = ensure_chunk_cache(path)
-    httpd = ThreadingHTTPServer((host, port), _handler(path, static_root, data_root))
-    bound_port = httpd.server_address[1]
+    app = create_app(
+        database_path,
+        password=os.getenv("FAMILY_PASSWORD") or None,
+        session_secret=os.getenv("SESSION_SECRET") or None,
+        secure_cookie=os.getenv("SESSION_COOKIE_SECURE") == "1",
+    )
     browser_host = host if host not in {"", "0.0.0.0", "::"} else "127.0.0.1"
     if ":" in browser_host and not browser_host.startswith("["):
         browser_host = f"[{browser_host}]"
-    url = f"http://{browser_host}:{bound_port}/"
+    url = f"http://{browser_host}:{port}/"
     if open_browser:
         timer = threading.Timer(0.1, webbrowser.open, args=(url,))
         timer.daemon = True
         timer.start()
     print(f"Serving Legacy Family Tree browser at {url}")
-    try:
-        httpd.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        httpd.server_close()
+    uvicorn.run(app, host=host, port=port)
 
 
-__all__ = ["serve"]
+__all__ = ["create_app", "serve"]

@@ -1,0 +1,8 @@
+.env
+data/
+backups/
+*.db
+*.sqlite
+*.sqlite3
+*.fdb
+*.hdb
