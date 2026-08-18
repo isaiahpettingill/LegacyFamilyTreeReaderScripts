@@ -15,6 +15,16 @@ docker version
 docker compose version
 ```
 
+Rootless Docker cannot publish ports below 1024 with the default kernel setting.
+If `docker info` reports a rootless security option, allow the rootless port
+forwarder to bind HTTP and HTTPS and persist the setting:
+
+```sh
+printf 'net.ipv4.ip_unprivileged_port_start=80\n' | \
+  sudo tee /etc/sysctl.d/99-rootless-ports.conf
+sudo sysctl --system
+```
+
 Clone the repository on the VPS and work from `deploy/vps`.
 
 ## Initial deploy
@@ -27,8 +37,7 @@ Clone the repository on the VPS and work from `deploy/vps`.
 cp .env.example .env
 chmod 600 .env
 install -d -m 700 data backups
-install -m 400 /path/to/family-tree.sqlite data/family-tree.sqlite
-sudo chown 10001:10001 data/family-tree.sqlite
+install -m 444 /path/to/family-tree.sqlite data/family-tree.sqlite
 ```
 
 3. Edit `.env`. Use a long unique family password and generate the session secret with
@@ -72,8 +81,10 @@ sudo sqlite3 "$backup" "PRAGMA quick_check;"
 ```
 
 Test restores periodically. Stop the stack before replacing the mounted database, retain the old
-file, set restored ownership to `10001:10001` and mode `400`, then start the stack and check its
-health. `.env`, `data/`, and `backups/` are ignored by Git and the Docker build context.
+file, set its mode to `444`, then start the stack and check its health. The `data` directory stays
+mode `700` and the container mount is read-only; using a world-readable file mode only inside that
+private directory avoids UID remapping failures in rootless or user-namespaced Docker. `.env`,
+`data/`, and `backups/` are ignored by Git and the Docker build context.
 
 ## Firewall
 

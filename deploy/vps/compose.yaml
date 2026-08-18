@@ -62,8 +62,9 @@ services:
       - caddy-data:/data
       - caddy-config:/config
     networks:
-      - frontend
-      - backend
+      frontend:
+        gw_priority: 1
+      backend:
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=32m
