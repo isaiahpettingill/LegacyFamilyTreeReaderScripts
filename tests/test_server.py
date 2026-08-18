@@ -66,7 +66,10 @@ def test_packaged_assets_deep_route_and_data_are_separated(merged_db: Path) -> N
         assert index.status_code == deep_route.status_code == full_tree_route.status_code == 200
         assert deep_route.content == index.content
         assert full_tree_route.content == index.content
+        assert index.headers["Cache-Control"] == "no-cache"
+        assert asset.headers["Cache-Control"] == "no-cache"
         assert "Legacy Family Archive" in index.text
+        assert "app.js?v=0.5.0" in index.text
         assert '<script src="vendor/sql-asm.js"' not in index.text
         assert '<script src="standalone.js"' not in index.text
         assert "javascript" in asset.headers["Content-Type"]

@@ -435,22 +435,28 @@ def create_app(
             return _json({"detail": "Not Found"}, HTTPStatus.NOT_FOUND)
         if not candidate.is_file():
             return _json({"detail": "Not Found"}, HTTPStatus.NOT_FOUND)
-        return FileResponse(candidate)
+        return FileResponse(candidate, headers={"Cache-Control": "no-cache"})
+
+    def index_file() -> FileResponse:
+        return FileResponse(
+            static_root / "index.html",
+            headers={"Cache-Control": "no-cache"},
+        )
 
     @app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
     def index() -> FileResponse:
-        return FileResponse(static_root / "index.html")
+        return index_file()
 
     @app.api_route(
         "/dataset/{dataset}/person/{person_id}", methods=["GET", "HEAD"], include_in_schema=False
     )
     def person_page(dataset: str, person_id: str) -> FileResponse:
         del dataset, person_id
-        return FileResponse(static_root / "index.html")
+        return index_file()
 
     @app.api_route("/full-tree", methods=["GET", "HEAD"], include_in_schema=False)
     def full_tree_page() -> FileResponse:
-        return FileResponse(static_root / "index.html")
+        return index_file()
 
     @app.api_route("/data/{data_path:path}", methods=["GET", "HEAD"], include_in_schema=False)
     def unavailable_data(data_path: str) -> JSONResponse:
