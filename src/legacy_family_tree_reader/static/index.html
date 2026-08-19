@@ -6,8 +6,8 @@
   <meta name="color-scheme" content="light">
   <title>Legacy Family Archive</title>
   <script>document.write('<base href="' + (location.protocol === 'file:' ? new URL('.', location.href).href : '/') + '">');</script>
-  <link rel="stylesheet" href="styles.css?v=0.5.0">
-  <script src="app.js?v=0.5.0" defer></script>
+  <link rel="stylesheet" href="styles.css?v=0.6.0">
+  <script src="app.js?v=0.6.0" defer></script>
 </head>
 <body>
   <a id="skip-link" class="skip-link" href="#main-content">Skip to family records</a>
@@ -172,23 +172,29 @@
   <section id="full-tree-panel" class="full-tree-panel" role="tabpanel" aria-labelledby="full-tree-tab" tabindex="0" hidden>
     <header class="full-tree-header">
       <div>
-        <p class="folio">The complete descendant record</p>
+        <p class="folio">Ancestor view</p>
         <h2>Douglas &amp; Martha Patten</h2>
-        <p>Dataset 1. Every recorded generation descending from their family, arranged by union.</p>
+        <p>Browse their recorded ancestors couple by couple. Expand a person to follow their line, or page Older to go further back.</p>
       </div>
       <div class="full-tree-summary" aria-live="polite"></div>
     </header>
+    <nav id="full-tree-breadcrumbs" class="anc-crumbs" aria-label="Ancestor view path" hidden></nav>
     <div class="full-tree-toolbar">
-      <p>Spouses share a family card. Lines leave the union in which each child is recorded.</p>
-      <div class="zoom-controls" role="group" aria-label="Full tree zoom">
-        <button id="full-tree-zoom-out" class="mini-button" type="button" aria-label="Zoom full tree out">&minus;</button>
+      <div class="full-tree-page-controls">
+        <button id="full-tree-reset" class="mini-button" type="button">Douglas &amp; Martha</button>
+        <button id="full-tree-newer" class="mini-button" type="button" aria-label="Show newer, fewer generations">&larr; Newer</button>
+        <output id="full-tree-generations" class="full-tree-generations" aria-live="polite">Showing generations 0&ndash;1</output>
+        <button id="full-tree-older" class="mini-button" type="button" aria-label="Show older, more generations">Older &rarr;</button>
+      </div>
+      <div class="zoom-controls" role="group" aria-label="Ancestor view zoom">
+        <button id="full-tree-zoom-out" class="mini-button" type="button" aria-label="Zoom ancestor view out">&minus;</button>
         <output id="full-tree-zoom-level" aria-live="polite">100%</output>
-        <button id="full-tree-zoom-in" class="mini-button" type="button" aria-label="Zoom full tree in">+</button>
+        <button id="full-tree-zoom-in" class="mini-button" type="button" aria-label="Zoom ancestor view in">+</button>
         <button id="full-tree-zoom-reset" class="mini-button" type="button">Reset view</button>
       </div>
     </div>
     <div id="full-tree-state" class="inline-state full-tree-state" role="status" aria-live="polite"></div>
-    <div id="full-tree-content" class="full-tree-content" tabindex="0" aria-label="Full family tree. Scroll, use arrow keys, or drag the blank canvas to pan."></div>
+    <div id="full-tree-content" class="full-tree-content" tabindex="0" aria-label="Ancestor family tree. Drag the canvas, use arrow keys, or the zoom controls to explore."></div>
   </section>
 
   <footer>

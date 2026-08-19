@@ -24,7 +24,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTex
 
 from .queries import (
     connect_read_only,
-    get_descendant_family_tree,
+    get_ancestor_family_tree,
     get_family,
     get_person,
     get_person_facts,
@@ -358,18 +358,18 @@ def create_app(
         dataset = _first(parameters, "dataset", "dataset_id")
         first = _first(parameters, "first", "first_person_id")
         second = _first(parameters, "second", "second_person_id")
-        if dataset is None or first is None or second is None:
+        if dataset is None or first is None:
             return _json(
-                {"error": "dataset, first, and second query parameters are required"},
+                {"error": "dataset and first query parameters are required"},
                 HTTPStatus.BAD_REQUEST,
             )
         return _api_call(
-            lambda: get_descendant_family_tree(
+            lambda: get_ancestor_family_tree(
                 path,
                 _identifier(dataset),
                 _identifier(first),
-                _identifier(second),
-                max_depth=int(_first(parameters, "max_depth", "generations") or "100"),
+                _identifier(second) if second is not None else None,
+                max_depth=int(_first(parameters, "max_depth", "generations") or "3"),
             ),
             missing_person=True,
             missing_message="One or both root people were not found",
